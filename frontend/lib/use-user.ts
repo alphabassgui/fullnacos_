@@ -18,8 +18,9 @@
 
 import { useEffect, useState } from "react";
 import type { User } from "@supabase/supabase-js";
-import { getDemoUser, type DemoUser } from "@/lib/demo-user";
+import { getDemoUser, useDemoIdentity, type DemoUser } from "@/lib/demo-user";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
+import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { getMe, isFlaskConfigured } from "@/lib/api";
 
 /** Map a Supabase auth user onto the app's DemoUser shape (metadata is set at sign up). */
@@ -37,9 +38,16 @@ function fromSupabaseUser(user: User): DemoUser {
 }
 
 export function useUser(): DemoUser {
+  // Pure demo mode (no Flask, no Supabase): the identity comes from the external
+  // demo-identity store, which serves the typed sign-up details when persisted and
+  // the "Ada" mock otherwise — SSR-stable, so no hydration mismatch.
+  const flask = isFlaskConfigured();
+  const demoMode = !flask && !isSupabaseConfigured();
+  const demoUser = useDemoIdentity();
+
   // In Flask mode start neutral (no "Ada" flash); otherwise start from the demo user.
   const [user, setUser] = useState<DemoUser>(() =>
-    isFlaskConfigured() ? { name: null, email: null, businessName: null } : getDemoUser(),
+    flask ? { name: null, email: null, businessName: null } : getDemoUser(),
   );
 
   useEffect(() => {
@@ -58,7 +66,7 @@ export function useUser(): DemoUser {
     }
 
     const supabase = getSupabaseBrowserClient();
-    if (!supabase) return; // demo mode: keep the demo user
+    if (!supabase) return; // demo mode: identity is served by useDemoIdentity above
 
     let active = true;
 
@@ -79,5 +87,5 @@ export function useUser(): DemoUser {
     };
   }, []);
 
-  return user;
+  return demoMode ? demoUser : user;
 }

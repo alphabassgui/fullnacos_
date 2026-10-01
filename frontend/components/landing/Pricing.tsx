@@ -2,9 +2,31 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ds";
+import { fetchMe, isFlaskConfigured } from "@/lib/api";
+import { getSupabaseBrowserClient } from "@/lib/supabase/client";
+import type { PlanId } from "@/lib/billing/plans.config";
 
 type Currency = "NGN" | "USD";
+
+/**
+ * Is there a signed-in user right now? Used by the paid-tier CTA to route an
+ * authenticated buyer straight to checkout, and everyone else to sign up (with
+ * the checkout preserved as callbackUrl). In pure demo mode (no backend) we
+ * treat the visitor as unauthenticated so the demo signup loop still runs.
+ */
+async function isAuthenticated(): Promise<boolean> {
+  if (isFlaskConfigured()) {
+    return (await fetchMe()).state === "authenticated";
+  }
+  const supabase = getSupabaseBrowserClient();
+  if (supabase) {
+    const { data } = await supabase.auth.getUser();
+    return !!data.user;
+  }
+  return false;
+}
 
 const PR_CUR: Record<Currency, { sym: string; code: string; group: boolean; line: string }> = {
   NGN: { sym: "₦", code: "NGN", group: true, line: "Billed in Naira. No dollar card, no FX surprise." },
@@ -20,6 +42,9 @@ type Tier = {
   perDay?: { monthly: string; annual: string };
   cta: string;
   ctaHref: string;
+  /** When set, this tier is a self-serve PAID plan: its CTA routes to the B-Moni
+   *  checkout (/pay?tier=<payTier>) via auth, instead of the plain ctaHref. */
+  payTier?: PlanId;
   popular?: boolean;
   filled?: boolean;
   micro?: string;
@@ -48,6 +73,7 @@ const PR_TIERS: Tier[] = [
     perDay: { monthly: "≈ ₦1,000 a day", annual: "≈ ₦800 a day" },
     cta: "Start free",
     ctaHref: "/signup",
+    payTier: "growth",
     filled: true,
     micro: "No card required. Cancel anytime.",
     features: ["Everything in Scan", "10 campaigns a month", "Email, SMS & call routing", "Full telemetry & learning", "Guardrails & approval rules", "Priority support"],
@@ -113,6 +139,14 @@ function PrSwap({ children, k }: { children: ReactNode; k: string }) {
 }
 
 function PrCard({ tier, cur, annual, index }: { tier: Tier; cur: Currency; annual: boolean; index: number }) {
+  const router = useRouter();
+  // Paid-tier CTA: authenticated → straight to checkout; otherwise sign up first
+  // with the checkout preserved as callbackUrl so login/signup returns there.
+  const goToCheckout = async (payTier: PlanId) => {
+    const dest = `/pay?tier=${payTier}`;
+    const authed = await isAuthenticated();
+    router.push(authed ? dest : `/signup?callbackUrl=${encodeURIComponent(dest)}`);
+  };
   const free = tier.price[cur] === 0;
   const now = free ? 0 : annual && tier.annual ? tier.annual[cur] : tier.price[cur];
   const was = annual && !free ? tier.price[cur] : null;
@@ -145,11 +179,25 @@ function PrCard({ tier, cur, annual, index }: { tier: Tier; cur: Currency; annua
           {perDay && <span className="gv-pr-day">{perDay}</span>}
         </div>
         <div className="gv-pr-ctablock">
-          <Link href={tier.ctaHref} className="gv-pr-cta-wrap">
-            <Button hierarchy={tier.filled ? "primary" : "secondary gray"} size="lg" style={{ width: "100%" }}>
-              {tier.cta}
-            </Button>
-          </Link>
+          {tier.payTier ? (
+            <div className="gv-pr-cta-wrap">
+              <Button
+                type="button"
+                hierarchy={tier.filled ? "primary" : "secondary gray"}
+                size="lg"
+                style={{ width: "100%" }}
+                onClick={() => void goToCheckout(tier.payTier!)}
+              >
+                {tier.cta}
+              </Button>
+            </div>
+          ) : (
+            <Link href={tier.ctaHref} className="gv-pr-cta-wrap">
+              <Button hierarchy={tier.filled ? "primary" : "secondary gray"} size="lg" style={{ width: "100%" }}>
+                {tier.cta}
+              </Button>
+            </Link>
+          )}
           {tier.micro && <span className="gv-pr-micro">{tier.micro}</span>}
         </div>
         <ul className="gv-pr-list">

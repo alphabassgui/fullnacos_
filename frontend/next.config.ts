@@ -1,11 +1,17 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // Pin the workspace root to this folder. Otherwise Turbopack infers the root
-  // from lockfiles and can pick up a stray package-lock.json in a parent
-  // directory (outside this git repo), which prints a warning at startup.
   turbopack: {
     root: __dirname,
+  },
+  allowedDevOrigins: ['audience-demote-siren.ngrok-free.dev'],
+  async rewrites() {
+    return [
+      {
+        source: '/api/backend/:path*',
+        destination: 'http://localhost:5000/:path*',
+      },
+    ];
   },
 };
 

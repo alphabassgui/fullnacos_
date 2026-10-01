@@ -7,6 +7,7 @@ import { Wordmark } from "@/components/ds";
 import { useMediaQuery } from "./use-media-query";
 import { createBusiness, isFlaskConfigured } from "@/lib/api";
 import { setCurrentBusinessId } from "@/lib/current-business";
+import { markOnboarded } from "@/lib/onboarding";
 
 /**
  * Onboarding — the 6-step split-screen intake in the demo loop
@@ -541,6 +542,7 @@ export function Onboarding({ initialStep = 0 }: { initialStep?: number }) {
         const business =
           data && typeof data === "object" ? (data as { business?: { id?: string } }).business : null;
         if (business?.id) setCurrentBusinessId(business.id);
+        markOnboarded();
         router.push(ANALYSE_HREF);
         return;
       }
@@ -573,6 +575,7 @@ export function Onboarding({ initialStep = 0 }: { initialStep?: number }) {
     }
     // Demo mode (no backend): unchanged — just kick off the simulated analysis.
     if (!isFlaskConfigured()) {
+      markOnboarded();
       router.push(ANALYSE_HREF);
       return;
     }
@@ -702,7 +705,10 @@ export function Onboarding({ initialStep = 0 }: { initialStep?: number }) {
             {step === TOTAL - 1 && (
               <button
                 type="button"
-                onClick={() => router.push(SKIP_HREF)}
+                onClick={() => {
+                  markOnboarded();
+                  router.push(SKIP_HREF);
+                }}
                 disabled={submitting}
                 className="groville-focus gv-ob-skip"
                 style={

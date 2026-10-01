@@ -1,7 +1,9 @@
 "use client";
 
 /**
- * Checkout — the 3-screen bank-transfer payment flow for the Growth plan.
+ * Checkout — the 3-screen bank-transfer payment flow for a paid plan (default
+ * Growth). The plan comes from the `tier` prop (app/pay/page.tsx reads it off
+ * ?tier=); all display copy and prices derive from lib/billing/plans.config.ts.
  *
  * Ported pixel-for-pixel from the Claude Design export (docs/payment-reference.html,
  * decoded bundle module). The reference is a static preview with a floating state
@@ -28,6 +30,9 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties, type Reac
 import Link from "next/link";
 import { Icons, Wordmark } from "@/components/ds";
 import { useUser } from "@/lib/use-user";
+import { getPlan, priceAll } from "@/lib/billing/pricing";
+import type { PlanId } from "@/lib/billing/plans.config";
+import { hasCompletedOnboarding } from "@/lib/onboarding";
 
 // Product surface tokens — Signal Blue dashboard values, flip under data-theme="light".
 const C = {
@@ -48,15 +53,39 @@ const BODY = "var(--font-body)";
 const SERIF: CSSProperties = { fontFamily: "var(--font-serif)", fontStyle: "italic", fontWeight: 400 };
 const NUM: CSSProperties = { fontFamily: DISPLAY, fontVariantNumeric: "tabular-nums" };
 
-// Display-only list prices. These match the locked demo numbers and lib/billing/
-// plans.config.ts. The amount the customer actually transfers is amountNgn from the
-// API, never a price sent from the browser.
-const PRICES = {
-  NGN: { sym: "₦", monthly: "30,000", annualTotal: "288,000", annualPerMo: "24,000" },
-  USD: { sym: "$", monthly: "59", annualTotal: "564", annualPerMo: "47" },
-} as const;
+type Currency = "NGN" | "USD";
 
-type Currency = keyof typeof PRICES;
+/** Display-only formatted prices for one currency. The amount the customer
+ *  actually transfers is amountNgn from the API, never a price sent from the
+ *  browser. */
+type PriceSet = { sym: string; monthly: string; annualTotal: string; annualPerMo: string };
+
+/**
+ * Formatted display prices for a plan, in both currencies, derived from the
+ * single source of truth (lib/billing/plans.config.ts via priceAll) so no price
+ * is ever hardcoded here. USD is display-only; when a plan has no USD price the
+ * fields read "—".
+ */
+function pricesFor(id: PlanId): Record<Currency, PriceSet> {
+  const m = priceAll("monthly").find((p) => p.id === id);
+  const a = priceAll("annual").find((p) => p.id === id);
+  const grp = (n: number) => n.toLocaleString("en-US");
+  const usd = (n: number | null | undefined) => (n != null ? grp(n) : "—");
+  return {
+    NGN: {
+      sym: "₦",
+      monthly: grp(m?.billedNgn ?? 0),
+      annualTotal: grp(a?.billedNgn ?? 0),
+      annualPerMo: grp(a?.perMonthNgn ?? 0),
+    },
+    USD: {
+      sym: "$",
+      monthly: usd(m?.perMonthUsd),
+      annualTotal: usd(a?.perMonthUsd != null ? a.perMonthUsd * 12 : null),
+      annualPerMo: usd(a?.perMonthUsd),
+    },
+  };
+}
 type Cycle = "Monthly" | "Annual";
 type Bank = { accountNumber: string; bankName: string; accountName: string };
 type Invoice = {
@@ -183,13 +212,17 @@ function PlanSummary({
   setCycle,
   currency,
   setCurrency,
+  planName,
+  prices,
 }: {
   cycle: Cycle;
   setCycle: (c: Cycle) => void;
   currency: Currency;
   setCurrency: (c: Currency) => void;
+  planName: string;
+  prices: Record<Currency, PriceSet>;
 }) {
-  const p = PRICES[currency];
+  const p = prices[currency];
   const annual = cycle === "Annual";
   const total = p.sym + (annual ? p.annualTotal : p.monthly);
   return (
@@ -221,16 +254,16 @@ function PlanSummary({
             color: C.text,
           }}
         >
-          Start <em style={SERIF}>Growth</em>
+          Start <em style={SERIF}>{planName}</em>
         </h2>
-        <span style={{ fontFamily: BODY, fontSize: 14, lineHeight: "21px", color: C.secondary }}>Growth plan</span>
+        <span style={{ fontFamily: BODY, fontSize: 14, lineHeight: "21px", color: C.secondary }}>{planName} plan</span>
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         {annual ? (
-          <SumRow label={"Growth annual (" + p.sym + p.annualPerMo + "/mo)"} value={p.sym + p.annualTotal} />
+          <SumRow label={planName + " annual (" + p.sym + p.annualPerMo + "/mo)"} value={p.sym + p.annualTotal} />
         ) : (
-          <SumRow label="Growth monthly" value={p.sym + p.monthly} />
+          <SumRow label={planName + " monthly"} value={p.sym + p.monthly} />
         )}
         {annual && (
           <div style={{ display: "flex" }}>
@@ -840,7 +873,25 @@ function DetailLine({ label, value, strong }: { label: string; value: string; st
   );
 }
 
-function Verified({ invoice, cycle, paidAt }: { invoice: Invoice; cycle: Cycle; paidAt: string | null }) {
+function Verified({
+  invoice,
+  cycle,
+  paidAt,
+  planName,
+}: {
+  invoice: Invoice;
+  cycle: Cycle;
+  paidAt: string | null;
+  planName: string;
+}) {
+  // Post-payment routing: a user who has finished onboarding goes straight to
+  // the dashboard; a new / not-yet-onboarded user is sent into the setup flow
+  // (welcome → onboarding → analysing → opportunities+tour). Verified only ever
+  // renders on the client (gated by client flow state), so reading the flag here
+  // is safe. See lib/onboarding.ts.
+  const onboarded = hasCompletedOnboarding();
+  const destination = onboarded ? "/opportunities" : "/welcome";
+  const ctaLabel = onboarded ? "Go to my dashboard" : "Continue setup";
   const when = paidAt ? new Date(paidAt) : new Date();
   const dateStr = when.toLocaleString("en-GB", {
     day: "2-digit",
@@ -904,19 +955,19 @@ function Verified({ invoice, cycle, paidAt }: { invoice: Invoice; cycle: Cycle; 
             Payment <em style={SERIF}>verified</em>
           </h2>
           <p style={{ margin: 0, fontFamily: BODY, fontSize: 15, lineHeight: "23px", color: C.secondary, textWrap: "pretty" }}>
-            Growth is active. I&apos;ll get to work on your first campaign.
+            {planName} is active. I&apos;ll get to work on your first campaign.
           </p>
         </div>
         <div style={{ width: "100%", display: "flex", flexDirection: "column" }}>
           <DetailLine label="Reference" value={invoice.invoiceId} />
           <DetailLine label="Method" value="Bank transfer" />
           <DetailLine label="Date & time" value={dateStr} />
-          <DetailLine label="Plan" value={cycle === "Annual" ? "Growth annual" : "Growth monthly"} />
+          <DetailLine label="Plan" value={planName + (cycle === "Annual" ? " annual" : " monthly")} />
           <DetailLine label="Total" value={formatNgn(invoice.amountNgn)} strong />
         </div>
         <div style={{ width: "100%", display: "flex" }}>
           <Link
-            href="/opportunities"
+            href={destination}
             className="gvpay-btn gvpay-focus"
             style={{
               flex: 1,
@@ -934,7 +985,7 @@ function Verified({ invoice, cycle, paidAt }: { invoice: Invoice; cycle: Cycle; 
               lineHeight: "22px",
             }}
           >
-            Go to my dashboard
+            {ctaLabel}
           </Link>
         </div>
       </section>
@@ -1070,7 +1121,13 @@ async function errorFrom(res: Response): Promise<string> {
   return "Something went wrong. Please try again.";
 }
 
-export function PaymentScreen() {
+export function PaymentScreen({ tier = "growth" }: { tier?: PlanId }) {
+  // The plan being purchased. Falls back to Growth for an unknown id so the page
+  // never renders empty. All display copy and prices derive from this.
+  const plan = getPlan(tier) ?? getPlan("growth")!;
+  const planName = plan.name;
+  const prices = pricesFor(plan.id);
+
   // The signed-in user (real Supabase user when configured, else the mock "Ada").
   const user = useUser();
   const [state, setState] = useState<FlowState>("details");
@@ -1130,7 +1187,7 @@ export function PaymentScreen() {
           email: form.email,
           businessName: form.businessName,
           phone: form.phone,
-          planId: "growth",
+          planId: plan.id,
           interval: cycle === "Annual" ? "annual" : "monthly",
         }),
       });
@@ -1154,7 +1211,7 @@ export function PaymentScreen() {
     } finally {
       setBusy(false);
     }
-  }, [form, cycle]);
+  }, [form, cycle, plan.id]);
 
   // Poll the invoice while waiting. paid -> verified, expired -> expired.
   useEffect(() => {
@@ -1243,7 +1300,7 @@ export function PaymentScreen() {
             alignItems: "start",
           }}
         >
-          <PlanSummary cycle={cycle} setCycle={setCycle} currency={currency} setCurrency={setCurrency} />
+          <PlanSummary cycle={cycle} setCycle={setCycle} currency={currency} setCurrency={setCurrency} planName={planName} prices={prices} />
           <div
             style={{
               background: C.s2,
@@ -1271,7 +1328,7 @@ export function PaymentScreen() {
       ) : (
         <main style={{ flex: 1, display: "flex", flexDirection: "column", paddingBottom: 96 }}>
           {state === "confirming" && <Confirming />}
-          {state === "verified" && invoice && <Verified invoice={invoice} cycle={cycle} paidAt={paidAt} />}
+          {state === "verified" && invoice && <Verified invoice={invoice} cycle={cycle} paidAt={paidAt} planName={planName} />}
           {state === "expired" && <Expired onRetry={reset} />}
         </main>
       )}

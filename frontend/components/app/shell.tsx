@@ -11,8 +11,10 @@ import { Tour } from "./Tour";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 import { useUser } from "@/lib/use-user";
 import { isFlaskConfigured, logout as flaskLogout } from "@/lib/api";
+import { clearDemoUser } from "@/lib/demo-user";
 import { useAuthGate } from "@/lib/use-auth-gate";
 import { useSidebarCollapsed, toggleSidebarCollapsed } from "@/lib/sidebar";
+import { useTour } from "@/lib/tour";
 
 /**
  * Shared dashboard chrome (ported from the OpenDesign `ui_kits/app/Shell.jsx`).
@@ -311,6 +313,10 @@ function LogoutButton({ onNavigate, collapsed = false }: { onNavigate?: () => vo
       const supabase = getSupabaseBrowserClient();
       if (supabase) {
         await supabase.auth.signOut();
+      } else {
+        // Demo mode: forget the persisted typed identity so the next sign-up /
+        // login starts clean rather than inheriting this business.
+        clearDemoUser();
       }
     }
     onNavigate?.();
@@ -629,6 +635,12 @@ export function DashboardShell({
   // Persisted collapse preference (external store: SSR renders expanded, the
   // client reconciles after hydration).
   const collapsed = useSidebarCollapsed();
+  // While the tour runs, keep the desktop rail expanded so the nav-* steps land
+  // on labeled rows (mirrors the mobile requestDrawer pattern). This is transient
+  // only — it never persists, so the prior collapse state is restored the moment
+  // the tour closes.
+  const tour = useTour();
+  const effectiveCollapsed = tour.open ? false : collapsed;
 
   // Client-side route gate for the real (Flask) auth path: redirects to /login when
   // /api/auth/me is 401. No-op in demo mode and on non-protected routes.
@@ -648,7 +660,7 @@ export function DashboardShell({
           className="gv-dash"
           style={{ display: "flex", height: "100dvh", background: C.bg, color: C.text, fontFamily: BODY }}
         >
-          <Sidebar active={active} collapsed={collapsed} onToggle={toggleSidebarCollapsed} />
+          <Sidebar active={active} collapsed={effectiveCollapsed} onToggle={toggleSidebarCollapsed} />
           <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
             <TopBar title={title} chips={chips} />
             {children}

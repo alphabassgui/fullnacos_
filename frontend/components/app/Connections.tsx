@@ -28,8 +28,9 @@ import {
  *
  * Data / env safety: every network call goes through lib/api.ts (which forces
  * credentials:'include' and reads NEXT_PUBLIC_API_BASE). When no backend is
- * configured, or the user has no business yet, we render a disabled card and
- * make ZERO network calls — so the build passes with no env set.
+ * configured (demo) we render a sample preview card, and when a signed-in user
+ * has no business yet a disabled card; both make ZERO network calls — so the
+ * build passes with no env set.
  *
  * Status: there is no /status route. On mount we call GET /repositories:
  *   200 → connected (the list drives the repo picker)
@@ -73,7 +74,7 @@ function LockGlyph({ size = 12 }: { size?: number }) {
   );
 }
 
-type ConnState = "loading" | "connected" | "not_connected" | "error" | "disabled";
+type ConnState = "loading" | "connected" | "not_connected" | "error" | "disabled" | "preview";
 
 /** Status pill mirroring the app's dashboard chip look. */
 function StateChip({ state }: { state: ConnState }) {
@@ -86,7 +87,9 @@ function StateChip({ state }: { state: ConnState }) {
           ? "Couldn't check"
           : state === "disabled"
             ? "Not available"
-            : "Not connected";
+            : state === "preview"
+              ? "Sample preview"
+              : "Not connected";
   const color = state === "connected" ? C.secondary : state === "error" ? C.bad : C.muted;
   const tip =
     state === "connected"
@@ -95,9 +98,11 @@ function StateChip({ state }: { state: ConnState }) {
         ? "I couldn't check this connection just now. Try again in a moment."
         : state === "disabled"
           ? "This connection isn't available in this environment yet."
-          : state === "loading"
-            ? "Checking whether your GitHub is linked."
-            : "Not linked yet. Connect GitHub so I can read your code and draft changes.";
+          : state === "preview"
+            ? "This is a preview with sample data. Sign up and add a business to connect your real GitHub."
+            : state === "loading"
+              ? "Checking whether your GitHub is linked."
+              : "Not linked yet. Connect GitHub so I can read your code and draft changes.";
   return (
     <InfoTip side="left" style={{ display: "inline-flex" }} tip={tip}>
       <span
@@ -600,7 +605,63 @@ function GithubConnection({ businessId }: { businessId: string }) {
 
 /* ── No-business / demo state (no network calls) ───────────────────────── */
 
-/** Disabled card shown when there's no current business (demo mode, or no business yet). */
+/** Sample repositories for the demo preview. Static, display-only. */
+const DEMO_REPOS: FlaskGithubRepository[] = [
+  { id: 1, name: "adas-bakery-site", full_name: "adas-bakery/adas-bakery-site", private: false, default_branch: "main", html_url: "" },
+  { id: 2, name: "adas-bakery-orders", full_name: "adas-bakery/adas-bakery-orders", private: true, default_branch: "main", html_url: "" },
+];
+
+/**
+ * Demo-mode preview (no backend configured). Looks connectable, but it is a
+ * preview: no network calls, nothing is actually connected.
+ */
+function DemoGithubCard() {
+  const m = useIsMobile();
+  const [clicked, setClicked] = useState(false);
+  const [picked, setPicked] = useState<string | null>(null);
+
+  const body = (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <ActionButton onClick={() => setClicked(true)} m={m}>
+        <Icons name="github" size={16} />
+        Connect GitHub
+      </ActionButton>
+
+      {clicked && (
+        <>
+          <p style={NOTE_STYLE}>
+            This is a preview, so nothing is connected. Once you add your business, I&apos;ll link your real GitHub
+            here.{" "}
+            <Link href={ONBOARDING_HREF} style={{ color: C.blueText, textDecoration: "none" }}>
+              Add your business
+            </Link>
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <span style={SUBHEAD_STYLE}>Pick the repository I should read</span>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {DEMO_REPOS.map((repo) => (
+                <RepoRow
+                  key={repo.id}
+                  repo={repo}
+                  selected={picked === repo.full_name}
+                  saving={false}
+                  onSelect={() => setPicked(repo.full_name)}
+                />
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+
+      <p style={NOTE_STYLE}>
+        I only read the repository you pick. I never merge or publish · every change waits for your approval.
+      </p>
+    </div>
+  );
+  return <GithubCard state="preview" body={body} m={m} />;
+}
+
+/** Disabled card shown only for a signed-in user who has no business yet. */
 function NoBusinessCard() {
   const m = useIsMobile();
   const body = (
@@ -651,8 +712,11 @@ function ConnectionsBody() {
     card = <GithubCard state="loading" body={<p style={NOTE_STYLE}>Loading your dashboard…</p>} m={m} />;
   } else if (business.status === "ready" && business.businessId) {
     card = <GithubConnection key={business.businessId} businessId={business.businessId} />;
+  } else if (business.status === "demo") {
+    // demo mode (no backend): a sample preview, mirroring Opportunities' demo posture.
+    card = <DemoGithubCard />;
   } else {
-    // demo mode (no env) or a signed-in user with no business yet.
+    // status === "none": a signed-in user with genuinely no business yet.
     card = <NoBusinessCard />;
   }
 

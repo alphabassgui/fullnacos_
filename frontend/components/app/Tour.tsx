@@ -224,7 +224,7 @@ function TourOverlay({ requestDrawer }: { requestDrawer?: (open: boolean) => voi
   // measurement — never on the pre-measurement first frame. Off-screen-but-
   // present anchors keep the step (pinned, ring-less card) — see useRect.
   useEffect(() => {
-    if (measured && !found) nextStep();
+    if (measured && !found) nextStep(true);
   }, [measured, found, step]);
 
   // On mobile the sidebar lives in a collapsed drawer, so its nav anchors are

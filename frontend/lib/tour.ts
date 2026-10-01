@@ -121,10 +121,18 @@ export function closeTour(): void {
   setState({ open: false });
 }
 
-/** Advance to the next step, or close on the last one (marking seen). */
-export function nextStep(): void {
+/**
+ * Advance to the next step, or close on the last one.
+ *
+ * `auto` marks a programmatic advance past a missing anchor (Tour.tsx's graceful
+ * skip). When the tour reaches the end purely by auto-skipping, we close WITHOUT
+ * marking it seen, so an absent anchor can never silently burn the seen flag —
+ * the tour retries on the next visit. A genuine user advance (`auto` false, the
+ * default) persists as before.
+ */
+export function nextStep(auto = false): void {
   if (state.step >= TOUR_STEPS.length - 1) {
-    markTourSeen();
+    if (!auto) markTourSeen();
     setState({ open: false });
     return;
   }

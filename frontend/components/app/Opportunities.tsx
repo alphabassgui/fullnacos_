@@ -170,6 +170,10 @@ function OppCard({
   return (
     <motion.article
       variants={variants}
+      // The hero card is the product tour's first anchor (TOUR_STEPS[0],
+      // data-tour="gap", radius 16 == this card's rounded-2xl). Present on the
+      // lead card in every render path (demo + Flask), never on secondary cards.
+      {...(hero ? { "data-tour": "gap" } : {})}
       className={
         "group/card relative flex flex-col gap-5 overflow-hidden rounded-2xl border border-[var(--border)] " +
         "transition-[transform,box-shadow,border-color] duration-150 ease-out " +

@@ -8,6 +8,7 @@ import { Wordmark, Icons } from "@/components/ds";
 import { useMediaQuery } from "./use-media-query";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 import { isFlaskConfigured, login as flaskLogin, register as flaskRegister } from "@/lib/api";
+import { getStoredDemoUser, saveDemoUser } from "@/lib/demo-user";
 
 /**
  * Auth — the Sign up / Log in split screen, the entry point of the demo loop
@@ -453,9 +454,13 @@ const AUTH_H1: CSSProperties = {
 const AUTH_SUB: CSSProperties = { margin: 0, fontFamily: "var(--font-body)", fontSize: 14, lineHeight: "21px", color: "var(--text-secondary)" };
 const AUTH_FORM: CSSProperties = { display: "flex", flexDirection: "column", gap: 24, width: "100%", maxWidth: 400 };
 
-export function AuthScreen({ mode }: { mode: "signup" | "login" }) {
+export function AuthScreen({ mode, callbackUrl }: { mode: "signup" | "login"; callbackUrl?: string }) {
   const router = useRouter();
   const mobile = useMediaQuery("(max-width: 860px)");
+  // Preserve the intended destination across the login ↔ signup toggle so a user
+  // who came from a pricing CTA keeps it when switching forms.
+  const withCallback = (base: "/login" | "/signup") =>
+    callbackUrl ? `${base}?callbackUrl=${encodeURIComponent(callbackUrl)}` : base;
   const [yourName, setYourName] = useState("");
   const [businessName, setBusinessName] = useState("");
   const [email, setEmail] = useState("");
@@ -497,14 +502,21 @@ export function AuthScreen({ mode }: { mode: "signup" | "login" }) {
         setError(li.data?.error ?? "Account created, but sign-in failed. Please log in.");
         return;
       }
-      router.push(welcomeHref());
+      router.push(callbackUrl ?? welcomeHref());
       return;
     }
 
     const supabase = getSupabaseBrowserClient();
-    // Demo mode (no Supabase env): keep the mock push so the demo loop still runs.
+    // Demo mode (no Supabase env): keep the mock push so the demo loop still runs,
+    // but first persist what was typed so the account card / avatar / greeting
+    // reflect this business instead of the hardcoded "Ada" mock.
     if (!supabase) {
-      router.push(welcomeHref());
+      saveDemoUser({
+        name: yourName.trim() || null,
+        email: email.trim() || null,
+        businessName: businessName.trim() || null,
+      });
+      router.push(callbackUrl ?? welcomeHref());
       return;
     }
     const name = businessName.trim();
@@ -545,14 +557,17 @@ export function AuthScreen({ mode }: { mode: "signup" | "login" }) {
         setError(li.data?.error ?? "Could not log you in. Please try again.");
         return;
       }
-      router.push("/opportunities");
+      router.push(callbackUrl ?? "/opportunities");
       return;
     }
 
     const supabase = getSupabaseBrowserClient();
-    // Demo mode (no Supabase env): keep the mock push.
+    // Demo mode (no Supabase env): keep the mock push. Only the email is typed at
+    // login, so merge it into any identity saved at sign-up (keeping name/business).
     if (!supabase) {
-      router.push("/opportunities");
+      const prior = getStoredDemoUser() ?? { name: null, businessName: null };
+      saveDemoUser({ ...prior, email: email.trim() || null });
+      router.push(callbackUrl ?? "/opportunities");
       return;
     }
     setSubmitting(true);
@@ -601,7 +616,7 @@ export function AuthScreen({ mode }: { mode: "signup" | "login" }) {
       </span>
       <span style={FOOTER}>
         Already have an account?{" "}
-        <Link href="/login" className="gv-auth-link" style={LINK}>
+        <Link href={withCallback("/login")} className="gv-auth-link" style={LINK}>
           Log in
         </Link>
       </span>
@@ -633,7 +648,7 @@ export function AuthScreen({ mode }: { mode: "signup" | "login" }) {
       </SubmitButton>
       <span style={FOOTER}>
         New to Groville?{" "}
-        <Link href="/signup" className="gv-auth-link" style={LINK}>
+        <Link href={withCallback("/signup")} className="gv-auth-link" style={LINK}>
           Start free
         </Link>
       </span>

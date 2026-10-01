@@ -8,7 +8,6 @@ class DryRunConnector(BaseConnector):
         action,
         business_id,
         user_id,
-        execution_id=None,
     ):
         """
         Safely simulate action execution.

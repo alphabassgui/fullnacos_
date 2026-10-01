@@ -36,7 +36,10 @@ export function useAuthGate(): void {
       // result (backend unreachable / CORS), stay put rather than bouncing the
       // user out on a transient error — a real 401 still gates.
       if (result.state === "unauthenticated") {
-        router.replace("/login");
+        // Preserve where the user was headed (e.g. /pay?tier=growth) so login
+        // can send them back there instead of the default dashboard.
+        const intended = window.location.pathname + window.location.search;
+        router.replace(`/login?callbackUrl=${encodeURIComponent(intended)}`);
       } else if (result.state === "unknown") {
         console.warn("[auth] Could not verify session against the backend; staying on the page.");
       }

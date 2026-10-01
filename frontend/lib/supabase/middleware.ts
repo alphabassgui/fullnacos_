@@ -52,8 +52,13 @@ export async function updateSession(request: NextRequest): Promise<NextResponse>
   } = await supabase.auth.getUser();
 
   if (!user && isProtectedPath(request.nextUrl.pathname)) {
+    // Preserve where the user was headed (e.g. /pay?tier=growth) so login can
+    // send them back there instead of the default dashboard.
+    const intended = request.nextUrl.pathname + request.nextUrl.search;
     const url = request.nextUrl.clone();
     url.pathname = "/login";
+    url.search = "";
+    url.searchParams.set("callbackUrl", intended);
     const redirect = NextResponse.redirect(url);
     // Carry any cookies refreshed during getUser() onto the redirect, so a
     // token rotation is not lost (documented @supabase/ssr pitfall).
