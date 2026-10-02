@@ -1,3 +1,4 @@
+import os
 from datetime import datetime
 from celery import Celery
 from firebase_admin import firestore
@@ -5,12 +6,13 @@ from firebase import db
 from website_analyzer import fetch_website_html, analyze_html
 from services.execution_engine import execute_action
 
+redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+
 celery = Celery(
     "ai_growth_agent",
-    broker="redis://localhost:6379/0",
-    backend="redis://localhost:6379/0",
+    broker=redis_url,
+    backend=redis_url,
 )
-
 @celery.task(
     bind=True,
     name="tasks.execute_approved_action"
