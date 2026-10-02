@@ -21,7 +21,11 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 app = Flask(__name__, template_folder="templates", static_folder="static")
 
 from flask_cors import CORS
-CORS(app, supports_credentials=True, origins=["http://localhost:3000"])
+CORS(app, supports_credentials=True, origins=[
+    "http://localhost:3000",
+    "https://groville.vercel.app",
+    "https://groville-git-main-the-alpha-s.vercel.app"
+])
 
 app.secret_key = os.getenv("SECRET_KEY")
 if not app.secret_key:
@@ -36,9 +40,9 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
 # Session configuration for security
 app.config.update(
-    SESSION_COOKIE_SECURE=not app.config["DEBUG"],  # True in production, False in local dev
+    SESSION_COOKIE_SECURE=True,
     SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE='Lax'
+    SESSION_COOKIE_SAMESITE='None'
 )
 
 
