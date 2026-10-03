@@ -4,6 +4,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import type { Interval, PlanId } from "./plans.config";
 import type { OwnerKey } from "../bmoni/wallet";
 
@@ -96,7 +97,10 @@ export interface Db {
   contacts: { id: string; at: string; name: string; email: string; message: string }[];
 }
 
-const FILE = path.join(process.cwd(), "data", "db.json");
+// Use /tmp on Vercel/serverless environments, local data folder in dev:
+const FILE = process.env.VERCEL || process.env.NODE_ENV === "production"
+  ? path.join(os.tmpdir(), "db.json")
+  : path.join(process.cwd(), "data", "db.json");
 
 const empty = (): Db => ({
   customers: [],
