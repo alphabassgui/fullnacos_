@@ -224,7 +224,7 @@ let retryAfter = 0;
 let failedOnce = false;
 
 export async function getPaymentAccount(): Promise<{ bank: BankAccountInfo; demo: boolean }> {
-  const fallback = process.env.DEMO_FALLBACK_ACCOUNT === "true" && process.env.NODE_ENV !== "production";
+  const fallback = process.env.DEMO_FALLBACK_ACCOUNT === "true";
 
   // Real account already set up: always use it.
   const m = readDb().merchant;

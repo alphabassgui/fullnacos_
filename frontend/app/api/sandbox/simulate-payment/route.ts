@@ -8,7 +8,7 @@ import { handle, json, readJson, str } from "@/lib/http";
 // with ALLOW_SIMULATE_PAYMENT=false. It moves no money.
 export async function POST(req: Request) {
   return handle(async () => {
-    if (process.env.NODE_ENV === "production" || process.env.ALLOW_SIMULATE_PAYMENT === "false") {
+    if (process.env.ALLOW_SIMULATE_PAYMENT === "false") {
       return json({ error: "Not available." }, 404);
     }
     const b = await readJson(req);
