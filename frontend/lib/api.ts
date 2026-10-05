@@ -40,6 +40,8 @@ export type FlaskUser = {
   email: string;
   role?: string;
   status?: string;
+  /** Source of truth for the one-time product tour (set by POST /api/auth/tour/complete). */
+  has_completed_tour?: boolean;
 };
 
 /**
@@ -121,6 +123,16 @@ export async function fetchMe(): Promise<MeResult> {
 export async function getMe(): Promise<FlaskUser | null> {
   const result = await fetchMe();
   return result.state === "authenticated" ? result.user : null;
+}
+
+/**
+ * POST /api/auth/tour/complete → 200 {success}. Marks the one-time product tour
+ * finished for the signed-in user (completed OR skipped). Idempotent. Returns the
+ * raw ApiResult so the caller can tell a real 200 from a 401/transport failure and
+ * decide whether to queue a retry.
+ */
+export function completeTour(): Promise<ApiResult> {
+  return apiFetch("/api/auth/tour/complete", { method: "POST" });
 }
 
 /**

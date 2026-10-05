@@ -43,6 +43,7 @@ def api_register():
             "subscription_status": False,
             "subscription_expiry": None,
             "status": "Active",
+            "has_completed_tour": False,
             "created_at": datetime.utcnow().isoformat(),
             "last_login": None,
         }
@@ -163,8 +164,33 @@ def api_me():
                 "email": user.get("email"),
                 "role": user.get("role"),
                 "status": user.get("status"),
+                # Source of truth for the one-time product tour. Defaults False for
+                # users created before this field existed, so they still see it once.
+                "has_completed_tour": user.get("has_completed_tour", False),
             },
         }), 200
     except Exception as exc:
         current_app.logger.error(f"API me error: {exc}")
+        return jsonify({"success": False, "error": "Internal server error."}), 500
+
+
+@api_auth_bp.route("/api/auth/tour/complete", methods=["POST"])
+def api_tour_complete():
+    """Persist that the signed-in user has finished (completed or skipped) the
+    product tour. Idempotent — safe to call more than once. Reuses the session
+    cookie auth used by every other /api endpoint; no new auth scheme."""
+    try:
+        user_id = session.get("user_id")
+        if not user_id:
+            return jsonify({"success": False, "error": "Authentication required"}), 401
+
+        user_ref = db.collection("users").document(user_id)
+        if not user_ref.get().exists:
+            session.clear()
+            return jsonify({"success": False, "error": "Authentication required"}), 401
+
+        user_ref.update({"has_completed_tour": True})
+        return jsonify({"success": True}), 200
+    except Exception as exc:
+        current_app.logger.error(f"API tour complete error: {exc}")
         return jsonify({"success": False, "error": "Internal server error."}), 500

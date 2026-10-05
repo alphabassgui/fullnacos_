@@ -5,13 +5,17 @@ import { usePathname } from "next/navigation";
 import {
   TOUR_STEPS,
   canAutoStartTour,
-  closeTour,
+  finishTour,
+  hasAutoStartedThisSession,
+  markAutoStartedThisSession,
   markTourSeen,
+  maybeSyncPendingTour,
   nextStep,
   prevStep,
   startTour,
   useTour,
 } from "@/lib/tour";
+import { fetchMe, isFlaskConfigured } from "@/lib/api";
 
 /**
  * Product tour (coach-mark / spotlight overlay). Ported pixel-for-pixel from the
@@ -254,9 +258,10 @@ function TourOverlay({ requestDrawer }: { requestDrawer?: (open: boolean) => voi
       ? Math.min(Math.max(16, place.anchorY - place.style.top - 7), CARD_H - 40)
       : 34;
 
+  // Skip / dismiss (button or scrim click): end immediately AND mark finished,
+  // persisting to the backend so it never returns.
   const dismiss = () => {
-    markTourSeen();
-    closeTour();
+    finishTour();
   };
 
   return (
@@ -424,13 +429,89 @@ export function Tour({ requestDrawer }: { requestDrawer?: (open: boolean) => voi
   const pathname = usePathname();
   const autoStarted = useRef(false);
 
-  // Auto-start once, only on the first landing on /opportunities.
+  // Retry a previously-failed backend "tour complete" write so it eventually
+  // reaches the DB (no-op in demo mode or when nothing is pending).
   useEffect(() => {
-    if (autoStarted.current) return;
-    if (pathname === "/opportunities" && canAutoStartTour()) {
+    maybeSyncPendingTour();
+  }, []);
+
+  // Auto-start once per session, only on the first landing on /opportunities,
+  // and only AFTER the first step's anchor (the hero gap card) exists in the DOM.
+  //
+  // Eligibility source of truth is the backend flag (has_completed_tour); the
+  // localStorage cache is a fast path. Readiness is gated on the real anchor
+  // (not a bare timeout) to fix the race where /opportunities' async data hasn't
+  // rendered yet. A bounded fallback only ENDS the wait (empty/error states never
+  // mount the anchor) — it never marks the tour seen, so eligibility survives.
+  useEffect(() => {
+    if (autoStarted.current || hasAutoStartedThisSession()) return;
+    if (pathname !== "/opportunities") return;
+
+    let cancelled = false;
+    let observer: MutationObserver | null = null;
+    let fallback: ReturnType<typeof setTimeout> | null = null;
+
+    const cleanup = () => {
+      cancelled = true;
+      observer?.disconnect();
+      observer = null;
+      if (fallback) {
+        clearTimeout(fallback);
+        fallback = null;
+      }
+    };
+
+    const fire = () => {
+      cleanup();
       autoStarted.current = true;
+      markAutoStartedThisSession();
       startTour();
+    };
+
+    // Wait for the hero anchor, then start. If it is already present, start now.
+    const beginWhenReady = () => {
+      if (cancelled) return;
+      if (document.querySelector('[data-tour="gap"]')) {
+        fire();
+        return;
+      }
+      observer = new MutationObserver(() => {
+        if (cancelled) return;
+        if (document.querySelector('[data-tour="gap"]')) fire();
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      // Fallback: the empty / error / no-business render paths never mount the
+      // gap anchor, so a pure wait-for-element would hang. Give up after a bounded
+      // window WITHOUT marking seen — the next successful load can still start it.
+      fallback = setTimeout(cleanup, 8000);
+    };
+
+    if (!isFlaskConfigured()) {
+      // Demo mode: no backend — the localStorage cache is the whole story.
+      if (canAutoStartTour()) beginWhenReady();
+      return cleanup;
     }
+
+    // Flask mode: trust a "seen" cache to skip the network; otherwise ask the
+    // backend (the source of truth) before starting, so a returning user on a
+    // fresh device (empty localStorage) does NOT see the tour again.
+    if (!canAutoStartTour()) return cleanup;
+
+    fetchMe().then((res) => {
+      if (cancelled) return;
+      if (res.state === "authenticated") {
+        if (res.user.has_completed_tour) {
+          markTourSeen(); // refresh the local cache to match the backend
+          return;
+        }
+        beginWhenReady();
+      }
+      // unauthenticated → useAuthGate redirects to /login; don't start.
+      // unknown (backend unreachable / CORS) → don't start now; eligibility is
+      // preserved (nothing marked), so a later mount retries.
+    });
+
+    return cleanup;
   }, [pathname]);
 
   // Esc closes the tour (treated as skip).
@@ -438,8 +519,7 @@ export function Tour({ requestDrawer }: { requestDrawer?: (open: boolean) => voi
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        markTourSeen();
-        closeTour();
+        finishTour();
       }
     };
     window.addEventListener("keydown", onKey);
