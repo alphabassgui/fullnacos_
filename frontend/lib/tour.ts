@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { completeTour, isFlaskConfigured } from "./api";
 
 /**
  * Product tour (coach-mark / spotlight overlay) state + step data.
@@ -63,8 +64,19 @@ export const TOUR_STEPS: TourStep[] = [
   },
 ];
 
-/** localStorage flag so the tour auto-starts only on the first visit. */
+/**
+ * localStorage key — a FAST HYDRATION CACHE + optimistic in-session guard, NOT
+ * the source of truth. The source of truth is the backend user field
+ * `has_completed_tour` (read via GET /api/auth/me, written via
+ * POST /api/auth/tour/complete). This cache lets us avoid a network round-trip
+ * when it already says "seen", and stops the tour re-looping within a session
+ * even if the backend write is still in flight or failed. In demo mode (no
+ * NEXT_PUBLIC_API_BASE) there is no backend, so this cache is the whole story.
+ */
 export const TOUR_SEEN_KEY = "groville_tour_seen";
+
+/** localStorage marker: a backend "tour complete" write failed and must be retried. */
+export const TOUR_SYNC_PENDING_KEY = "groville_tour_sync_pending";
 
 /** True once the tour has been completed or skipped. Never throws. */
 export function hasSeenTour(): boolean {
@@ -88,13 +100,99 @@ export function canAutoStartTour(): boolean {
   }
 }
 
-/** Persist that the tour has been seen. Never throws. */
+/** Persist that the tour has been seen (local cache only). Never throws. */
 export function markTourSeen(): void {
   try {
     localStorage.setItem(TOUR_SEEN_KEY, "1");
   } catch {
     // no-op when storage is unavailable
   }
+}
+
+function setSyncPending(pending: boolean): void {
+  try {
+    if (pending) localStorage.setItem(TOUR_SYNC_PENDING_KEY, "1");
+    else localStorage.removeItem(TOUR_SYNC_PENDING_KEY);
+  } catch {
+    // no-op when storage is unavailable
+  }
+}
+
+function isSyncPending(): boolean {
+  try {
+    return localStorage.getItem(TOUR_SYNC_PENDING_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Module-level guard so the tour auto-starts AT MOST ONCE per browser session,
+ * even if <Tour /> unmounts and remounts (e.g. navigating between route groups).
+ * Separate from the per-component ref, and it never blocks a manual `startTour()`
+ * replay — only the automatic first-run trigger consults it.
+ */
+let autoStartedThisSession = false;
+export function hasAutoStartedThisSession(): boolean {
+  return autoStartedThisSession;
+}
+export function markAutoStartedThisSession(): void {
+  autoStartedThisSession = true;
+}
+
+/**
+ * Push "tour complete" to the backend (the source of truth) with a few bounded
+ * retries. On success clears the pending marker; on exhaustion sets it so
+ * `maybeSyncPendingTour()` can finish the job on a later load. No-op in demo mode
+ * (no backend configured). Gated on NEXT_PUBLIC_API_BASE presence, never NODE_ENV,
+ * so local and Vercel behave identically.
+ */
+async function pushTourComplete(attempt = 0): Promise<void> {
+  if (!isFlaskConfigured()) return;
+  try {
+    const res = await completeTour();
+    if (res.ok) {
+      setSyncPending(false);
+      return;
+    }
+    // A 401 means no session to write against — nothing to retry here; leave the
+    // optimistic local cache in place and let a future authenticated load sync.
+    if (res.status === 401 || res.status === 403) {
+      setSyncPending(true);
+      return;
+    }
+  } catch {
+    // transport error — fall through to retry
+  }
+  if (attempt < 2) {
+    const delay = 500 * Math.pow(2, attempt); // 500ms, 1000ms
+    setTimeout(() => void pushTourComplete(attempt + 1), delay);
+    return;
+  }
+  setSyncPending(true);
+}
+
+/**
+ * Finish the tour (user completed the last step OR skipped/dismissed/Esc). Writes
+ * the local cache IMMEDIATELY (optimistic — stops any in-session re-loop), closes
+ * the overlay, then persists to the backend so the tour never returns on any
+ * device. Safe to call more than once; the backend write is idempotent.
+ */
+export function finishTour(): void {
+  markTourSeen();
+  setState({ open: false });
+  void pushTourComplete();
+}
+
+/**
+ * Retry a previously-failed backend "tour complete" write. Call on app/Tour mount
+ * in Flask mode so a dropped write eventually reaches the DB. No-op when nothing
+ * is pending or there is no backend.
+ */
+export function maybeSyncPendingTour(): void {
+  if (!isFlaskConfigured()) return;
+  if (!isSyncPending()) return;
+  void pushTourComplete();
 }
 
 type TourState = { open: boolean; step: number };
@@ -132,8 +230,14 @@ export function closeTour(): void {
  */
 export function nextStep(auto = false): void {
   if (state.step >= TOUR_STEPS.length - 1) {
-    if (!auto) markTourSeen();
-    setState({ open: false });
+    if (auto) {
+      // Auto-skipped to the end past a missing anchor — do NOT burn the flag or
+      // persist; the tour retries on the next visit (existing resilience).
+      setState({ open: false });
+    } else {
+      // Genuine completion of the last step → persist to the backend.
+      finishTour();
+    }
     return;
   }
   setState({ step: state.step + 1 });
