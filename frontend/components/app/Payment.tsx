@@ -1110,6 +1110,11 @@ html[data-theme="dark"],html[data-theme="dark"] body{background:var(--bg)!import
 
 const POLL_MS = 4000;
 
+// Ceiling for each serverless→BMONI call (/api/subscribe, invoice poll,
+// simulate-payment). Bounds the request via AbortController so a stuck gateway
+// can never strand the screen on "Setting up your transfer…" forever.
+const PAY_TIMEOUT_MS = 20000;
+
 /** Read `{ error }` from a failed response, falling back to a generic message. */
 async function errorFrom(res: Response): Promise<string> {
   try {
@@ -1177,11 +1182,14 @@ export function PaymentScreen({ tier = "growth" }: { tier?: PlanId }) {
   const startTransfer = useCallback(async () => {
     setBusy(true);
     setDetailsError(null);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), PAY_TIMEOUT_MS);
     try {
       const res = await fetch("/api/subscribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
+        signal: controller.signal,
         body: JSON.stringify({
           name: form.name,
           email: form.email,
@@ -1207,8 +1215,13 @@ export function PaymentScreen({ tier = "growth" }: { tier?: PlanId }) {
       setTransferError(null);
       setState("transfer");
     } catch {
-      setDetailsError("I could not reach the payment service. Check your connection and try again.");
+      setDetailsError(
+        controller.signal.aborted
+          ? "The payment service is taking too long to respond. Please try again."
+          : "I could not reach the payment service. Check your connection and try again.",
+      );
     } finally {
+      clearTimeout(timer);
       setBusy(false);
     }
   }, [form, cycle, plan.id]);
@@ -1219,10 +1232,13 @@ export function PaymentScreen({ tier = "growth" }: { tier?: PlanId }) {
     let active = true;
     const tick = async () => {
       setRemaining(timeLeft(invoice.expiresAt));
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), PAY_TIMEOUT_MS);
       try {
         const res = await fetch(`/api/invoices/${encodeURIComponent(invoice.invoiceId)}`, {
           credentials: "include",
           cache: "no-store",
+          signal: controller.signal,
         });
         if (!active || !res.ok) return;
         const data = await res.json();
@@ -1233,7 +1249,9 @@ export function PaymentScreen({ tier = "growth" }: { tier?: PlanId }) {
           setState("expired");
         }
       } catch {
-        // Transient network error — keep polling; the next tick may succeed.
+        // Transient network error or a timed-out tick — keep polling; the next tick may succeed.
+      } finally {
+        clearTimeout(timer);
       }
     };
     tick();
@@ -1249,11 +1267,14 @@ export function PaymentScreen({ tier = "growth" }: { tier?: PlanId }) {
     if (!invoice) return;
     setSimulating(true);
     setTransferError(null);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), PAY_TIMEOUT_MS);
     try {
       const res = await fetch("/api/sandbox/simulate-payment", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
+        signal: controller.signal,
         body: JSON.stringify({ invoiceId: invoice.invoiceId }),
       });
       if (res.ok || res.status === 409) {
@@ -1263,8 +1284,13 @@ export function PaymentScreen({ tier = "growth" }: { tier?: PlanId }) {
       }
       setTransferError(await errorFrom(res));
     } catch {
-      setTransferError("I could not reach the payment service. Check your connection and try again.");
+      setTransferError(
+        controller.signal.aborted
+          ? "The payment service is taking too long to respond. Please try again."
+          : "I could not reach the payment service. Check your connection and try again.",
+      );
     } finally {
+      clearTimeout(timer);
       setSimulating(false);
     }
   }, [invoice]);

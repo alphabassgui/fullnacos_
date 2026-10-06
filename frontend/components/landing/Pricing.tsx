@@ -18,7 +18,11 @@ type Currency = "NGN" | "USD";
  */
 async function isAuthenticated(): Promise<boolean> {
   if (isFlaskConfigured()) {
-    return (await fetchMe()).state === "authenticated";
+    const me = await fetchMe();
+    // "unknown" = couldn't reach the backend (e.g. a cold-start timeout). Throw
+    // so the CTA can offer a retry instead of silently routing to /signup.
+    if (me.state === "unknown") throw new Error("Could not reach the backend");
+    return me.state === "authenticated";
   }
   const supabase = getSupabaseBrowserClient();
   if (supabase) {
@@ -140,12 +144,32 @@ function PrSwap({ children, k }: { children: ReactNode; k: string }) {
 
 function PrCard({ tier, cur, annual, index }: { tier: Tier; cur: Currency; annual: boolean; index: number }) {
   const router = useRouter();
+  // Paid-tier CTA state: `busy` disables the button while the session check runs
+  // (so duplicate clicks can't fire concurrent fetchMe calls), `waking` swaps in a
+  // reassuring label once a Render cold start drags past ~4s, and `failed` surfaces
+  // an inline retry when the backend is unreachable.
+  const [busy, setBusy] = useState(false);
+  const [waking, setWaking] = useState(false);
+  const [failed, setFailed] = useState(false);
   // Paid-tier CTA: authenticated → straight to checkout; otherwise sign up first
   // with the checkout preserved as callbackUrl so login/signup returns there.
   const goToCheckout = async (payTier: PlanId) => {
+    if (busy) return;
     const dest = `/pay?tier=${payTier}`;
-    const authed = await isAuthenticated();
-    router.push(authed ? dest : `/signup?callbackUrl=${encodeURIComponent(dest)}`);
+    setFailed(false);
+    setBusy(true);
+    const wakeTimer = setTimeout(() => setWaking(true), 4000);
+    try {
+      const authed = await isAuthenticated();
+      // Leave `busy` true so the button stays disabled through client navigation.
+      router.push(authed ? dest : `/signup?callbackUrl=${encodeURIComponent(dest)}`);
+    } catch {
+      setFailed(true);
+      setBusy(false);
+      setWaking(false);
+    } finally {
+      clearTimeout(wakeTimer);
+    }
   };
   const free = tier.price[cur] === 0;
   const now = free ? 0 : annual && tier.annual ? tier.annual[cur] : tier.price[cur];
@@ -185,11 +209,24 @@ function PrCard({ tier, cur, annual, index }: { tier: Tier; cur: Currency; annua
                 type="button"
                 hierarchy={tier.filled ? "primary" : "secondary gray"}
                 size="lg"
+                state={busy ? "disabled" : "default"}
                 style={{ width: "100%" }}
                 onClick={() => void goToCheckout(tier.payTier!)}
               >
-                {tier.cta}
+                {busy && waking ? "Waking things up…" : tier.cta}
               </Button>
+              {failed && (
+                <span className="gv-pr-micro" style={{ color: "var(--error)", display: "block", marginTop: 8 }}>
+                  Couldn&apos;t reach the server.{" "}
+                  <button
+                    type="button"
+                    onClick={() => void goToCheckout(tier.payTier!)}
+                    style={{ color: "var(--accent-text)", background: "none", border: "none", padding: 0, font: "inherit", cursor: "pointer", textDecoration: "underline" }}
+                  >
+                    Try again
+                  </button>
+                </span>
+              )}
             </div>
           ) : (
             <Link href={tier.ctaHref} className="gv-pr-cta-wrap">
