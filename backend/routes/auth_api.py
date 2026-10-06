@@ -11,6 +11,35 @@ from firebase import db
 api_auth_bp = Blueprint("api_auth", __name__)
 
 
+def _has_onboarding_evidence(user_id):
+    """Durable onboarding evidence: at least one business owned by the user that
+    has a completed analysis run (``agent_runs`` doc with
+    ``analysis_status == "completed"``). Lets already-onboarded (legacy) users be
+    recognised even when the stored flag predates this field. Bounded and
+    best-effort — any Firestore error returns False so /api/auth/me falls back to
+    the stored flag (default False)."""
+    try:
+        businesses = (
+            db.collection("businesses")
+            .where(filter=FieldFilter("owner_id", "==", user_id))
+            .stream()
+        )
+        for business in businesses:
+            completed = (
+                db.collection("businesses")
+                .document(business.id)
+                .collection("agent_runs")
+                .where(filter=FieldFilter("analysis_status", "==", "completed"))
+                .limit(1)
+                .get()
+            )
+            if completed:
+                return True
+        return False
+    except Exception:
+        return False
+
+
 @api_auth_bp.route("/api/auth/register", methods=["POST"])
 def api_register():
     try:
@@ -44,6 +73,7 @@ def api_register():
             "subscription_expiry": None,
             "status": "Active",
             "has_completed_tour": False,
+            "has_completed_onboarding": False,
             "created_at": datetime.utcnow().isoformat(),
             "last_login": None,
         }
@@ -167,6 +197,13 @@ def api_me():
                 # Source of truth for the one-time product tour. Defaults False for
                 # users created before this field existed, so they still see it once.
                 "has_completed_tour": user.get("has_completed_tour", False),
+                # Source of truth for onboarding completion (post-payment routing).
+                # HYBRID: the stored flag OR durable evidence (a business with a
+                # completed analysis run), so legacy users who onboarded before this
+                # field existed are recognised instead of re-sent through the funnel.
+                # `or` short-circuits, so the derive only runs when the flag is False.
+                "has_completed_onboarding": bool(user.get("has_completed_onboarding", False))
+                or _has_onboarding_evidence(user_doc.id),
             },
         }), 200
     except Exception as exc:
@@ -193,4 +230,26 @@ def api_tour_complete():
         return jsonify({"success": True}), 200
     except Exception as exc:
         current_app.logger.error(f"API tour complete error: {exc}")
+        return jsonify({"success": False, "error": "Internal server error."}), 500
+
+
+@api_auth_bp.route("/api/auth/onboarding/complete", methods=["POST"])
+def api_onboarding_complete():
+    """Persist that the signed-in user has finished onboarding. Idempotent — safe
+    to call more than once. Reuses the session cookie auth used by every other
+    /api endpoint; no new auth scheme."""
+    try:
+        user_id = session.get("user_id")
+        if not user_id:
+            return jsonify({"success": False, "error": "Authentication required"}), 401
+
+        user_ref = db.collection("users").document(user_id)
+        if not user_ref.get().exists:
+            session.clear()
+            return jsonify({"success": False, "error": "Authentication required"}), 401
+
+        user_ref.update({"has_completed_onboarding": True})
+        return jsonify({"success": True}), 200
+    except Exception as exc:
+        current_app.logger.error(f"API onboarding complete error: {exc}")
         return jsonify({"success": False, "error": "Internal server error."}), 500

@@ -414,6 +414,7 @@ def registration():
             "subscription_expiry":  None,
             "status":               "Active",
             "has_completed_tour":   False,
+            "has_completed_onboarding": False,
             "created_at":           datetime.utcnow().isoformat(),
             "last_login":           None,
         }
