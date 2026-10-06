@@ -48,20 +48,36 @@ export type FlaskUser = {
  * Low-level fetch: prefixes the base URL, always sends the session cookie, and
  * parses the JSON body defensively. Throws only when no base is configured —
  * callers gate on isFlaskConfigured() first, so that never happens in practice.
+ *
+ * A timeout (default 60s, generous enough for a Render free-tier cold start)
+ * bounds the request via AbortController so a hung backend can never stall a
+ * caller forever; on abort it throws a timeout error, which fetchMe()'s catch
+ * turns into { state: "unknown" }. Callers may override timeoutMs.
  */
-async function apiFetch(path: string, init: RequestInit = {}): Promise<ApiResult> {
+async function apiFetch(path: string, init: RequestInit = {}, timeoutMs = 60000): Promise<ApiResult> {
   const base = getApiBase();
   if (!base) throw new Error("NEXT_PUBLIC_API_BASE is not configured");
 
   const hasBody = init.body != null;
-  const res = await fetch(base + path, {
-    ...init,
-    credentials: "include",
-    headers: {
-      ...(hasBody ? { "Content-Type": "application/json" } : {}),
-      ...(init.headers ?? {}),
-    },
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let res: Response;
+  try {
+    res = await fetch(base + path, {
+      ...init,
+      credentials: "include",
+      signal: controller.signal,
+      headers: {
+        ...(hasBody ? { "Content-Type": "application/json" } : {}),
+        ...(init.headers ?? {}),
+      },
+    });
+  } catch (err) {
+    if (controller.signal.aborted) throw new Error("Request timed out after " + timeoutMs + "ms");
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 
   let data: ApiData = null;
   try {
