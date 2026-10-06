@@ -42,6 +42,10 @@ export type FlaskUser = {
   status?: string;
   /** Source of truth for the one-time product tour (set by POST /api/auth/tour/complete). */
   has_completed_tour?: boolean;
+  /** Source of truth for onboarding completion (set by POST /api/auth/onboarding/complete,
+   *  or derived server-side from a business with a completed analysis run). Drives
+   *  post-payment routing so an existing user is never re-sent through the funnel. */
+  has_completed_onboarding?: boolean;
 };
 
 /**
@@ -149,6 +153,15 @@ export async function getMe(): Promise<FlaskUser | null> {
  */
 export function completeTour(): Promise<ApiResult> {
   return apiFetch("/api/auth/tour/complete", { method: "POST" });
+}
+
+/**
+ * POST /api/auth/onboarding/complete → 200 {success}. Marks onboarding finished
+ * for the signed-in user. Idempotent. Returns the raw ApiResult so the caller can
+ * tell a real 200 from a 401/transport failure and decide whether to queue a retry.
+ */
+export function completeOnboarding(): Promise<ApiResult> {
+  return apiFetch("/api/auth/onboarding/complete", { method: "POST" });
 }
 
 /**

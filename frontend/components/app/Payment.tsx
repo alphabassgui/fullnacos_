@@ -32,7 +32,8 @@ import { Icons, Wordmark } from "@/components/ds";
 import { useUser } from "@/lib/use-user";
 import { getPlan, priceAll } from "@/lib/billing/pricing";
 import type { PlanId } from "@/lib/billing/plans.config";
-import { hasCompletedOnboarding } from "@/lib/onboarding";
+import { fetchMe, isFlaskConfigured } from "@/lib/api";
+import { hasCompletedOnboarding, maybeSyncPendingOnboarding } from "@/lib/onboarding";
 
 // Product surface tokens — Signal Blue dashboard values, flip under data-theme="light".
 const C = {
@@ -884,14 +885,43 @@ function Verified({
   paidAt: string | null;
   planName: string;
 }) {
-  // Post-payment routing: a user who has finished onboarding goes straight to
-  // the dashboard; a new / not-yet-onboarded user is sent into the setup flow
-  // (welcome → onboarding → analysing → opportunities+tour). Verified only ever
-  // renders on the client (gated by client flow state), so reading the flag here
-  // is safe. See lib/onboarding.ts.
-  const onboarded = hasCompletedOnboarding();
+  // Post-payment routing: a user who has finished onboarding goes straight to the
+  // dashboard; a new / not-yet-onboarded user is sent into the setup flow
+  // (welcome → onboarding → analysing → opportunities+tour).
+  //
+  // Source of truth is the backend (`has_completed_onboarding` from /api/auth/me),
+  // NOT localStorage alone — otherwise an existing user on a new device / cleared
+  // storage reads as "not onboarded" and is wrongly re-sent through the funnel.
+  // Flask mode: use the local cache optimistically ONLY when it is positively true
+  // (so a fresh-browser existing user never flashes "/welcome"); otherwise hold at
+  // null (loading) and confirm via fetchMe() before enabling the CTA, so there is
+  // no wrong redirect on refresh. Demo mode (no API base): the cache is the whole
+  // story, synchronously. Verified only ever renders on the client. See lib/onboarding.ts.
+  const flask = isFlaskConfigured();
+  const [onboarded, setOnboarded] = useState<boolean | null>(() =>
+    flask ? (hasCompletedOnboarding() ? true : null) : hasCompletedOnboarding(),
+  );
+  useEffect(() => {
+    if (!flask) return; // demo mode: the synchronous cache value stands
+    maybeSyncPendingOnboarding(); // finish a previously-failed backend write
+    let active = true;
+    fetchMe().then((res) => {
+      if (!active) return;
+      if (res.state === "authenticated") {
+        setOnboarded(!!res.user.has_completed_onboarding);
+      } else {
+        // Unreachable / no session: fall back to the cache so we never hang loading.
+        setOnboarded(hasCompletedOnboarding());
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [flask]);
+
+  const loading = onboarded === null;
   const destination = onboarded ? "/opportunities" : "/welcome";
-  const ctaLabel = onboarded ? "Go to my dashboard" : "Continue setup";
+  const ctaLabel = loading ? "One moment…" : onboarded ? "Go to my dashboard" : "Continue setup";
   const when = paidAt ? new Date(paidAt) : new Date();
   const dateStr = when.toLocaleString("en-GB", {
     day: "2-digit",
@@ -966,10 +996,8 @@ function Verified({
           <DetailLine label="Total" value={formatNgn(invoice.amountNgn)} strong />
         </div>
         <div style={{ width: "100%", display: "flex" }}>
-          <Link
-            href={destination}
-            className="gvpay-btn gvpay-focus"
-            style={{
+          {(() => {
+            const ctaStyle: CSSProperties = {
               flex: 1,
               display: "inline-flex",
               alignItems: "center",
@@ -983,10 +1011,25 @@ function Verified({
               fontWeight: 500,
               fontSize: 15,
               lineHeight: "22px",
-            }}
-          >
-            {ctaLabel}
-          </Link>
+            };
+            // While the backend status is unknown, keep the CTA disabled so the
+            // user can never click through to the wrong destination.
+            return loading ? (
+              <button
+                type="button"
+                disabled
+                aria-busy="true"
+                className="gvpay-btn gvpay-focus"
+                style={{ ...ctaStyle, border: "none", cursor: "default", opacity: 0.7 }}
+              >
+                {ctaLabel}
+              </button>
+            ) : (
+              <Link href={destination} className="gvpay-btn gvpay-focus" style={ctaStyle}>
+                {ctaLabel}
+              </Link>
+            );
+          })()}
         </div>
       </section>
     </div>

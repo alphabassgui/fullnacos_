@@ -67,6 +67,9 @@ class AuthRef:
     def get(self):
         return AuthSnapshot(self._db._store.get(self.path), self.id)
 
+    def collection(self, name):
+        return AuthCollection(self._db, self.path + (name,))
+
     def set(self, data):
         self._db._store[self.path] = dict(data)
 
@@ -175,6 +178,7 @@ def test_register_creates_user(fake_firebase, client):
     assert ref.data["username"] == "Alice"
     assert ref.data["role"] == "user"
     assert ref.data["status"] == "Active"
+    assert ref.data["has_completed_onboarding"] is False
     assert ref.data["password_hash"] != "password123"
     assert check_password_hash(ref.data["password_hash"], "password123") is True
 
@@ -367,8 +371,116 @@ def test_me_returns_logged_in_user(fake_firebase, client):
     assert resp.status_code == 200
     assert resp.get_json() == {
         "success": True,
-        "user": {"id": "u1", "username": "Alice", "email": "alice@example.com", "role": "user", "status": "Active"},
+        "user": {
+            "id": "u1",
+            "username": "Alice",
+            "email": "alice@example.com",
+            "role": "user",
+            "status": "Active",
+            "has_completed_tour": False,
+            "has_completed_onboarding": False,
+        },
     }
+
+
+def test_me_returns_onboarding_flag_true(fake_firebase, client):
+    db, routes_auth, auth_api = fake_firebase
+    seed_users(db, {"u1": {
+        "username": "Alice", "email": "alice@example.com", "role": "user", "status": "Active",
+        "has_completed_onboarding": True,
+    }})
+    with client.session_transaction() as sess:
+        sess["user_id"] = "u1"
+
+    resp = client.get("/api/auth/me")
+    assert resp.status_code == 200
+    assert resp.get_json()["user"]["has_completed_onboarding"] is True
+
+
+def test_me_derives_onboarding_from_completed_run(fake_firebase, client):
+    # Legacy user: no stored flag, but owns a business with a completed analysis
+    # run → /me derives has_completed_onboarding True (hybrid evidence path).
+    db, routes_auth, auth_api = fake_firebase
+    seed_users(db, {"u1": {
+        "username": "Alice", "email": "alice@example.com", "role": "user", "status": "Active",
+    }})
+    business_ref = db.collection("businesses").document("b1")
+    business_ref.set({"owner_id": "u1", "name": "Ada's Bakery"})
+    business_ref.collection("agent_runs").document("r1").set({
+        "owner_id": "u1", "analysis_status": "completed",
+    })
+    with client.session_transaction() as sess:
+        sess["user_id"] = "u1"
+
+    resp = client.get("/api/auth/me")
+    assert resp.status_code == 200
+    assert resp.get_json()["user"]["has_completed_onboarding"] is True
+
+
+def test_me_onboarding_false_without_completed_run(fake_firebase, client):
+    # A business exists but its run has not completed → no evidence, flag stays False.
+    db, routes_auth, auth_api = fake_firebase
+    seed_users(db, {"u1": {
+        "username": "Alice", "email": "alice@example.com", "role": "user", "status": "Active",
+    }})
+    business_ref = db.collection("businesses").document("b1")
+    business_ref.set({"owner_id": "u1", "name": "Ada's Bakery"})
+    business_ref.collection("agent_runs").document("r1").set({
+        "owner_id": "u1", "analysis_status": "running",
+    })
+    with client.session_transaction() as sess:
+        sess["user_id"] = "u1"
+
+    resp = client.get("/api/auth/me")
+    assert resp.status_code == 200
+    assert resp.get_json()["user"]["has_completed_onboarding"] is False
+
+
+def test_onboarding_complete_sets_flag(fake_firebase, client):
+    db, routes_auth, auth_api = fake_firebase
+    seed_users(db, {"u1": {
+        "username": "Alice", "email": "alice@example.com", "role": "user", "status": "Active",
+    }})
+    with client.session_transaction() as sess:
+        sess["user_id"] = "u1"
+
+    resp = client.post("/api/auth/onboarding/complete")
+    assert resp.status_code == 200
+    assert resp.get_json() == {"success": True}
+    assert db.collection("users").document("u1").data["has_completed_onboarding"] is True
+
+
+def test_onboarding_complete_is_idempotent(fake_firebase, client):
+    db, routes_auth, auth_api = fake_firebase
+    seed_users(db, {"u1": {
+        "username": "Alice", "email": "alice@example.com", "role": "user", "status": "Active",
+        "has_completed_onboarding": True,
+    }})
+    with client.session_transaction() as sess:
+        sess["user_id"] = "u1"
+
+    resp = client.post("/api/auth/onboarding/complete")
+    assert resp.status_code == 200
+    assert resp.get_json() == {"success": True}
+    assert db.collection("users").document("u1").data["has_completed_onboarding"] is True
+
+
+def test_onboarding_complete_requires_auth(client):
+    resp = client.post("/api/auth/onboarding/complete")
+    assert resp.status_code == 401
+    assert resp.get_json() == {"success": False, "error": "Authentication required"}
+
+
+def test_onboarding_complete_unknown_user_clears_session(fake_firebase, client):
+    db, routes_auth, auth_api = fake_firebase
+    with client.session_transaction() as sess:
+        sess["user_id"] = "ghost"
+
+    resp = client.post("/api/auth/onboarding/complete")
+    assert resp.status_code == 401
+    assert resp.get_json() == {"success": False, "error": "Authentication required"}
+    with client.session_transaction() as sess:
+        assert "user_id" not in sess
 
 
 def test_me_requires_auth(client):
