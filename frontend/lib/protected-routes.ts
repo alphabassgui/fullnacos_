@@ -1,7 +1,7 @@
 /**
- * The authenticated areas of the app, in one place so both the server-side
- * Supabase gate (lib/supabase/middleware.ts) and the client-side Flask gate
- * (lib/use-auth-gate.ts) agree on exactly which routes are protected.
+ * The authenticated areas of the app used by the server-side Supabase gate
+ * (lib/supabase/middleware.ts). The client-side Flask path gates via the
+ * RequireAuth route guards (components/app/guards.tsx), wired per segment layout.
  *
  * Server-safe: no client-only imports, so the Supabase proxy can use it too.
  */

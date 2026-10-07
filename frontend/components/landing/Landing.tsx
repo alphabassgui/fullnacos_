@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { NavDark } from "@/components/ds";
+import { useAuth } from "@/lib/auth-context";
 import { MobileNav } from "./MobileNav";
 import { Hero, LogoStrip, Capabilities, Benchmarks, Features, ProofSection, Testimonials, PricingSection, Faq, CtaBand, Footer } from "./Sections";
 
@@ -15,6 +16,14 @@ const NAV_HREFS = NAV.map((n) => "#" + n[1]);
 
 export function Landing() {
   const [active, setActive] = useState("Platform");
+  // Adaptive nav CTA: a signed-in visitor sees "Go to workspace" instead of the
+  // guest "Start free". Public landing stays reachable by everyone; this only
+  // relabels the nav button and never bounces anyone off "/". Until the session
+  // resolves (user === null) the guest CTA shows, preserving the signup funnel.
+  const { user } = useAuth();
+  const authed = !!user;
+  const navCta = authed ? "Go to workspace" : "Start free";
+  const navCtaHref = authed ? "/opportunities" : "/signup";
 
   useEffect(() => {
     const visible = new Set<string>();
@@ -59,9 +68,9 @@ export function Landing() {
   return (
     <div style={{ minHeight: "100vh", background: "transparent" }}>
       <div className="gv-desk-nav" style={{ position: "sticky", top: 0, zIndex: 50, padding: "0 24px", display: "flex", justifyContent: "center" }}>
-        <NavDark links={NAV_LABELS} linkHrefs={NAV_HREFS} active={active} onLinkClick={go} cta="Start free" ctaHref="/signup" />
+        <NavDark links={NAV_LABELS} linkHrefs={NAV_HREFS} active={active} onLinkClick={go} cta={navCta} ctaHref={navCtaHref} />
       </div>
-      <MobileNav links={NAV.map(([l, id]) => [l, "#" + id])} onLinkClick={go} />
+      <MobileNav links={NAV.map(([l, id]) => [l, "#" + id])} onLinkClick={go} authed={authed} />
       <Hero />
       <LogoStrip />
       <Capabilities />

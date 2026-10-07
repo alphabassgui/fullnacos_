@@ -14,7 +14,8 @@
  * auth path and its session cookie is HttpOnly on the backend's own origin —
  * this server never sees it, so a Supabase check here would wrongly bounce a
  * Flask-authenticated user off every protected route. In that case this stands
- * down entirely; gating is done client-side (lib/use-auth-gate.ts) instead.
+ * down entirely; gating is done client-side via the RequireAuth / RequireGuest
+ * route guards (components/app/guards.tsx) instead.
  */
 
 import { createServerClient } from "@supabase/ssr";
