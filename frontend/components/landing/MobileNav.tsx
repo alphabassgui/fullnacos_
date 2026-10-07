@@ -62,12 +62,9 @@ const MN_SOCIAL: [string, string][] = [
 export function MobileNav({
   links,
   onLinkClick,
-  authed = false,
 }: {
   links: [string, string][];
   onLinkClick?: (e: React.MouseEvent, label: string, href: string) => void;
-  /** Signed-in visitors get a single "Go to workspace" CTA instead of log in / start free. */
-  authed?: boolean;
 }) {
   // SSR-safe default; the real theme is adopted after mount to avoid a hydration mismatch.
   const [theme, setTheme] = useState<string>("dark");
@@ -147,20 +144,12 @@ export function MobileNav({
         <span className="gv-mov-streaks" aria-hidden="true" />
         <div className="gv-mov-inner">
           <div className="gv-mov-cta">
-            {authed ? (
-              <Link className="gv-mov-cta-btn" href="/opportunities" tabIndex={open ? 0 : -1}>
-                Go to workspace {MN_ICON.arrow}
-              </Link>
-            ) : (
-              <>
-                <Link className="gv-mov-login" href="/login" tabIndex={open ? 0 : -1}>
-                  Log in
-                </Link>
-                <Link className="gv-mov-cta-btn" href="/signup" tabIndex={open ? 0 : -1}>
-                  Start free {MN_ICON.arrow}
-                </Link>
-              </>
-            )}
+            <Link className="gv-mov-login" href="/login" tabIndex={open ? 0 : -1}>
+              Log in
+            </Link>
+            <Link className="gv-mov-cta-btn" href="/signup" tabIndex={open ? 0 : -1}>
+              Start free {MN_ICON.arrow}
+            </Link>
           </div>
           <span className="gv-mov-label">Explore</span>
           <nav className="gv-mov-links" aria-label="Sections">
