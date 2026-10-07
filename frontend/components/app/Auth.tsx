@@ -8,7 +8,6 @@ import { Wordmark, Icons } from "@/components/ds";
 import { useMediaQuery } from "./use-media-query";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 import { isFlaskConfigured, login as flaskLogin, register as flaskRegister } from "@/lib/api";
-import { useAuth } from "@/lib/auth-context";
 import { getStoredDemoUser, saveDemoUser } from "@/lib/demo-user";
 
 /**
@@ -457,7 +456,6 @@ const AUTH_FORM: CSSProperties = { display: "flex", flexDirection: "column", gap
 
 export function AuthScreen({ mode, callbackUrl }: { mode: "signup" | "login"; callbackUrl?: string }) {
   const router = useRouter();
-  const { refresh } = useAuth();
   const mobile = useMediaQuery("(max-width: 860px)");
   // Preserve the intended destination across the login ↔ signup toggle so a user
   // who came from a pricing CTA keeps it when switching forms.
@@ -504,9 +502,6 @@ export function AuthScreen({ mode, callbackUrl }: { mode: "signup" | "login"; ca
         setError(li.data?.error ?? "Account created, but sign-in failed. Please log in.");
         return;
       }
-      // Populate the shared auth state before navigating so the destination's
-      // RequireAuth sees the signed-in user instead of bouncing back to /login.
-      await refresh();
       router.push(callbackUrl ?? welcomeHref());
       return;
     }
@@ -562,9 +557,6 @@ export function AuthScreen({ mode, callbackUrl }: { mode: "signup" | "login"; ca
         setError(li.data?.error ?? "Could not log you in. Please try again.");
         return;
       }
-      // Populate the shared auth state before navigating so the destination's
-      // RequireAuth sees the signed-in user instead of bouncing back to /login.
-      await refresh();
       router.push(callbackUrl ?? "/opportunities");
       return;
     }
