@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { AuthProvider } from "@/lib/auth-context";
 
 export const metadata: Metadata = {
   title: "Groville · the customers you are missing, found",
@@ -29,7 +30,9 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       </head>
       {/* suppressHydrationWarning: browser extensions (e.g. ColorZilla's
           cz-shortcut-listen) inject attributes on <body> before React hydrates. */}
-      <body suppressHydrationWarning>{children}</body>
+      <body suppressHydrationWarning>
+        <AuthProvider>{children}</AuthProvider>
+      </body>
     </html>
   );
 }

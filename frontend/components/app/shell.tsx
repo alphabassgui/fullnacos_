@@ -12,7 +12,7 @@ import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 import { useUser } from "@/lib/use-user";
 import { isFlaskConfigured, logout as flaskLogout } from "@/lib/api";
 import { clearDemoUser } from "@/lib/demo-user";
-import { useAuthGate } from "@/lib/use-auth-gate";
+import { useAuth } from "@/lib/auth-context";
 import { useSidebarCollapsed, toggleSidebarCollapsed } from "@/lib/sidebar";
 import { useTour } from "@/lib/tour";
 
@@ -303,12 +303,16 @@ function AccountButton({ collapsed, name, sub }: { collapsed: boolean; name: str
  *  no session, so it just routes to /login. */
 function LogoutButton({ onNavigate, collapsed = false }: { onNavigate?: () => void; collapsed?: boolean }) {
   const router = useRouter();
+  const { refresh } = useAuth();
   const [busy, setBusy] = useState(false);
 
   const onLogout = async () => {
     setBusy(true);
     if (isFlaskConfigured()) {
       await flaskLogout();
+      // Drop the cached session so the provider (and any guard) sees the user as
+      // signed out immediately, not on the next hard refresh.
+      await refresh();
     } else {
       const supabase = getSupabaseBrowserClient();
       if (supabase) {
@@ -642,9 +646,9 @@ export function DashboardShell({
   const tour = useTour();
   const effectiveCollapsed = tour.open ? false : collapsed;
 
-  // Client-side route gate for the real (Flask) auth path: redirects to /login when
-  // /api/auth/me is 401. No-op in demo mode and on non-protected routes.
-  useAuthGate();
+  // Auth gating now lives at the App Router layer (RequireAuth wraps each protected
+  // segment's layout), sourced from the single AuthProvider — so the shell no longer
+  // runs its own per-route check.
 
   // Suppress the landing's ambient dark glows on dashboards and paint the solid
   // canvas. Rendered as a <style> (in the initial SSR HTML) rather than a
