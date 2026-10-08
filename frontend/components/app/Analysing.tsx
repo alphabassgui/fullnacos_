@@ -39,7 +39,7 @@ const NEXT_HREF = "/opportunities";
 /** Agent-voice scan steps. Copy stays within Groville's honest scope (read → find →
  *  draft) with no invented metrics. Google Search Console is a later, optional
  *  connection, so it is not part of this first scan. */
-const STEPS = [
+export const STEPS = [
   "Reading your website",
   "Finding the gaps worth chasing",
   "Drafting your first campaign",
@@ -60,7 +60,7 @@ html[data-theme="dark"],html[data-theme="dark"] body{background:#04060F!importan
 `;
 
 /** One checklist row: pending (hollow) → active (pulsing) → done (check). */
-function StepRow({ label, state }: { label: string; state: "pending" | "active" | "done" }) {
+export function StepRow({ label, state }: { label: string; state: "pending" | "active" | "done" }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
       <span

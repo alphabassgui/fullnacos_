@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import Link from "next/link";
 import { motion, useReducedMotion, type Variants } from "framer-motion";
-import { Icons } from "@/components/ds";
+import { Icons, Button } from "@/components/ds";
 import { C, DISPLAY, BODY, MONO_EYEBROW, DashboardShell } from "./shell";
 import { InfoTip } from "@/components/ui/tooltip";
 import { useIsMobile } from "./use-media-query";
@@ -25,7 +25,7 @@ import {
   DEMO_OPPORTUNITIES,
   SUBHEAD_STYLE,
 } from "./opportunities-data";
-import { AppLoader } from "./AppLoader";
+import { STEPS, StepRow } from "./Analysing";
 import { OpportunitiesEmptyState } from "./OpportunitiesEmptyState";
 
 /**
@@ -336,9 +336,12 @@ function ReanalyzingBanner() {
 function OpportunitiesList({
   opportunities,
   reanalyzing = false,
+  onRerun,
 }: {
   opportunities: FlaskOpportunity[];
   reanalyzing?: boolean;
+  /** When provided, a quiet "Re-run audit" button appears in the board header. */
+  onRerun?: () => void;
 }) {
   const m = useIsMobile();
   const reduced = useReducedMotion();
@@ -366,26 +369,46 @@ function OpportunitiesList({
       }}
     >
       {reanalyzing && <ReanalyzingBanner />}
-      <div style={{ display: "flex", flexDirection: "column", gap: 8, maxWidth: 720 }}>
-        <h2
-          style={{
-            margin: 0,
-            fontFamily: DISPLAY,
-            fontWeight: 500,
-            fontSize: "clamp(20px, 2.2vw, 24px)",
-            lineHeight: 1.36,
-            letterSpacing: "-0.3px",
-            color: C.text,
-            textWrap: "pretty",
-          }}
-        >
-          Here&apos;s what I{" "}
-          <em style={{ fontFamily: SERIF, fontStyle: "italic", fontWeight: 400 }}>found</em> on your site. I found a few
-          things worth fixing.
-        </h2>
-        <p style={{ margin: 0, fontFamily: BODY, fontSize: 14, lineHeight: "21px", color: C.secondary, textWrap: "pretty" }}>
-          Highest impact first, so the one to chase is at the top. Nothing goes live until you approve it.
-        </p>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "flex-start",
+          justifyContent: "space-between",
+          gap: 16,
+          flexWrap: "wrap",
+        }}
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, maxWidth: 720, minWidth: 0, flex: "1 1 320px" }}>
+          <h2
+            style={{
+              margin: 0,
+              fontFamily: DISPLAY,
+              fontWeight: 500,
+              fontSize: "clamp(20px, 2.2vw, 24px)",
+              lineHeight: 1.36,
+              letterSpacing: "-0.3px",
+              color: C.text,
+              textWrap: "pretty",
+            }}
+          >
+            Here&apos;s what I{" "}
+            <em style={{ fontFamily: SERIF, fontStyle: "italic", fontWeight: 400 }}>found</em> on your site. I found a few
+            things worth fixing.
+          </h2>
+          <p style={{ margin: 0, fontFamily: BODY, fontSize: 14, lineHeight: "21px", color: C.secondary, textWrap: "pretty" }}>
+            Highest impact first, so the one to chase is at the top. Nothing goes live until you approve it.
+          </p>
+        </div>
+        {onRerun && !reanalyzing && (
+          <Button
+            hierarchy="secondary gray"
+            size="md"
+            onClick={onRerun}
+            style={{ borderRadius: m ? 999 : 10, flexShrink: 0, justifyContent: "center" }}
+          >
+            Re-run audit
+          </Button>
+        )}
       </div>
 
       <motion.section
@@ -454,6 +477,148 @@ type View =
   | { kind: "ready"; opportunities: FlaskOpportunity[]; reanalyzing?: boolean }
   | { kind: "noGaps" } // run finished (or site saved) with zero opportunities — offer a re-run
   | { kind: "error"; mode: "load" | "failed" | "timeout" };
+
+/**
+ * In-board analyzing state — shown on the dashboard (inside DashboardShell) while a
+ * first audit runs, in place of the generic "Waking things up…" cold-start loader.
+ * Reuses the real, honest scan copy from Analysing.tsx (STEPS + StepRow) so it reads
+ * as "running your analysis", not "starting a server". The checklist advances on a
+ * gentle cosmetic timer (never claims server-side progress or 100%) — the real
+ * completion comes from the parent's poll, which then swaps in the board.
+ */
+function AnalyzingBoard() {
+  const m = useIsMobile();
+  const reduced = useReducedMotion();
+  const [active, setActive] = useState(reduced ? STEPS.length - 1 : 0);
+
+  useEffect(() => {
+    if (reduced) return;
+    const t = window.setInterval(() => {
+      setActive((a) => (a < STEPS.length - 1 ? a + 1 : a));
+    }, 2400);
+    return () => window.clearInterval(t);
+  }, [reduced]);
+
+  // Cosmetic only: ramps but never reaches 100% (completion swaps the view).
+  const progress = Math.round(((active + 1) / (STEPS.length + 1)) * 100);
+
+  return (
+    <main style={{ flex: 1, overflowY: "auto", background: C.bg, display: "flex", minWidth: 0 }}>
+      <div
+        style={{
+          margin: "auto",
+          width: "100%",
+          maxWidth: 520,
+          boxSizing: "border-box",
+          padding: m ? "40px 16px" : "48px 24px",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          gap: m ? 22 : 26,
+          textAlign: "center",
+        }}
+      >
+        {/* Scan indicator — pulsing ring around the live dot (static under reduced motion). */}
+        <span
+          aria-hidden="true"
+          style={{ position: "relative", width: 56, height: 56, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+        >
+          {!reduced && (
+            <span
+              className="gv-pulse"
+              style={{ position: "absolute", inset: 0, borderRadius: 99, background: "var(--tint, rgba(24,93,241,.16))" }}
+            />
+          )}
+          <span
+            style={{
+              position: "relative",
+              width: 44,
+              height: 44,
+              borderRadius: 99,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: C.blue,
+              boxShadow: "var(--shadow-primary-glow)",
+            }}
+          >
+            <Icons name="vital-sign" size={22} style={{ color: "#fff" }} />
+          </span>
+        </span>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <span style={MONO_EYEBROW}>Analysing</span>
+          <h2
+            style={{
+              margin: 0,
+              fontFamily: DISPLAY,
+              fontWeight: 600,
+              fontSize: m ? "clamp(22px, 6vw, 28px)" : 28,
+              lineHeight: m ? 1.2 : "36px",
+              letterSpacing: "-0.6px",
+              color: C.text,
+              textWrap: "pretty",
+            }}
+          >
+            Reading your{" "}
+            <em style={{ fontFamily: SERIF, fontStyle: "italic", fontWeight: 400, color: C.blueText }}>site</em>.
+          </h2>
+          <p style={{ margin: 0, fontFamily: BODY, fontSize: 15, lineHeight: "22px", color: C.secondary }}>
+            I&apos;m scanning your public pages for the gaps worth fixing. This usually takes a minute or two.
+          </p>
+        </div>
+
+        {/* Cosmetic progress bar */}
+        <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 8 }}>
+          <span
+            role="progressbar"
+            aria-valuenow={progress}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-label="Analysis in progress"
+            style={{ display: "block", width: "100%", height: 6, borderRadius: 6, background: C.border, overflow: "hidden" }}
+          >
+            <span
+              style={{
+                display: "block",
+                height: "100%",
+                width: progress + "%",
+                borderRadius: 6,
+                background: "var(--gradient-primary, " + C.blue + ")",
+                transition: reduced ? "none" : "width .5s cubic-bezier(.4,0,.2,1)",
+              }}
+            />
+          </span>
+        </div>
+
+        {/* Stepped checklist (shared with the /analysing screen) */}
+        <div
+          style={{
+            width: "100%",
+            boxSizing: "border-box",
+            background: C.s1,
+            border: "1px solid " + C.border,
+            borderRadius: 16,
+            padding: m ? 20 : 28,
+            display: "flex",
+            flexDirection: "column",
+            gap: 16,
+            textAlign: "left",
+          }}
+        >
+          {STEPS.map((label, i) => {
+            const state: "pending" | "active" | "done" = i < active ? "done" : i === active ? "active" : "pending";
+            return <StepRow key={label} label={label} state={state} />;
+          })}
+        </div>
+
+        <p style={{ margin: 0, fontFamily: BODY, fontSize: 12, lineHeight: "18px", color: C.muted, maxWidth: 420 }}>
+          I only read and draft. Nothing goes live until you approve it.
+        </p>
+      </div>
+    </main>
+  );
+}
 
 /**
  * The real Flask Opportunities experience: status-aware branching driven by the
@@ -620,20 +785,35 @@ function FlaskOpportunities({
     [startPolling],
   );
 
-  // Re-run the audit from the no-gaps / timeout states (business already has a site).
-  const rerun = useCallback(async () => {
-    if (businessId == null) {
-      setView({ kind: "empty" });
-      return;
-    }
-    setView({ kind: "analyzing" });
-    const started = await analyzeBusiness(businessId);
-    if (!started.ok) {
-      setView({ kind: "error", mode: "failed" });
-      return;
-    }
-    startPolling(businessId);
-  }, [businessId, startPolling]);
+  // Re-run the audit. From a populated board (keepOpps passed) we keep the board on
+  // screen with the "re-analyzing" banner; from no-gaps / error (no board) we show the
+  // full in-board analyzing state.
+  const rerun = useCallback(
+    async (keepOpps?: FlaskOpportunity[]) => {
+      if (businessId == null) {
+        setView({ kind: "empty" });
+        return;
+      }
+      const hasBoard = !!keepOpps && keepOpps.length > 0;
+      if (hasBoard) {
+        setView({ kind: "ready", opportunities: keepOpps as FlaskOpportunity[], reanalyzing: true });
+      } else {
+        setView({ kind: "analyzing" });
+      }
+      const started = await analyzeBusiness(businessId);
+      if (!started.ok) {
+        // Keep valid results if a board was showing; otherwise surface the error.
+        if (hasBoard) {
+          setView({ kind: "ready", opportunities: keepOpps as FlaskOpportunity[] });
+        } else {
+          setView({ kind: "error", mode: "failed" });
+        }
+        return;
+      }
+      startPolling(businessId, hasBoard ? keepOpps : undefined);
+    },
+    [businessId, startPolling],
+  );
 
   if (view.kind === "detecting") {
     return (
@@ -648,12 +828,9 @@ function FlaskOpportunities({
   }
 
   if (view.kind === "analyzing") {
-    // Reuse the established cold-start loader ("Waking things up…") while the run works.
-    return (
-      <main style={{ flex: 1, overflowY: "auto", background: C.bg, display: "flex", minWidth: 0 }}>
-        <AppLoader />
-      </main>
-    );
+    // In-board scan UI (reuses the honest Analysing copy) — reads as "running your
+    // analysis", not the generic server-cold-start loader.
+    return <AnalyzingBoard />;
   }
 
   if (view.kind === "error") {
@@ -696,7 +873,13 @@ function FlaskOpportunities({
     );
   }
 
-  return <OpportunitiesList opportunities={view.opportunities} reanalyzing={view.reanalyzing} />;
+  return (
+    <OpportunitiesList
+      opportunities={view.opportunities}
+      reanalyzing={view.reanalyzing}
+      onRerun={() => void rerun(view.opportunities)}
+    />
+  );
 }
 
 const retryButton: CSSProperties = {

@@ -153,18 +153,23 @@ export function OpportunitiesEmptyState({
           >
             Add website &amp; run audit
           </Button>
-          <Button
-            hierarchy="secondary gray"
-            size="xl"
-            onClick={restart}
-            style={{
-              borderRadius: m ? 999 : 10,
-              width: m ? "100%" : undefined,
-              justifyContent: "center",
-            }}
-          >
-            Restart guided onboarding
-          </Button>
+          {/* Only offered when there's no business yet. With an existing business the
+              modal above already attaches the website (updateBusiness); routing to
+              /onboarding would run createBusiness again and make a duplicate. */}
+          {businessId == null && (
+            <Button
+              hierarchy="secondary gray"
+              size="xl"
+              onClick={restart}
+              style={{
+                borderRadius: m ? 999 : 10,
+                width: m ? "100%" : undefined,
+                justifyContent: "center",
+              }}
+            >
+              Restart guided onboarding
+            </Button>
+          )}
         </div>
       </div>
 
