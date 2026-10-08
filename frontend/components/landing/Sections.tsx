@@ -186,7 +186,7 @@ export function Features() {
 
 export function Testimonials() {
   return (
-    <Section className="section--cards" style={{ position: "relative" }}>
+    <Section className="section--cards" style={{ position: "relative", overflowX: "clip" }}>
       <div className="gv-mesh" aria-hidden="true">
         <span className="gv-mesh-a" />
         <span className="gv-mesh-b" />

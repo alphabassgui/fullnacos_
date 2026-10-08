@@ -1895,9 +1895,10 @@ html[data-theme="dark"] #root::after{left:50%;bottom:2180px;width:min(1800px,140
 .gv-hero-cta-1{background:#185DF1!important;color:#F3F7FE!important;box-shadow:0 12px 28px -12px rgba(24,93,241,.9)!important}
 .gv-hero-cta-2{box-shadow:inset 0 0 0 1px rgba(174,187,212,.26)!important}
 .groville-accent{display:none!important}
-.groville-rig{transform:scale(1.262)!important;transform-origin:top center!important;margin-bottom:120px!important}
 }
-@media (max-width:380px){.gv-hero-cta-1,.gv-hero-cta-2{font-size:15px!important;padding:0 14px!important}.groville-rig{transform:scale(1.18)!important;margin-bottom:83px!important}}
+/* Keep the hero rig's tablet size unchanged (>=768px); phones (<768px) use the scale-down ladder above so the mockup fits. */
+@media (min-width:768px) and (max-width:900px){.groville-rig{transform:scale(1.262);transform-origin:top center;margin-bottom:120px}}
+@media (max-width:380px){.gv-hero-cta-1,.gv-hero-cta-2{font-size:15px!important;padding:0 14px!important}}
 /* closing CTA button, mobile only */
 @media (max-width:899px){
 .gv-close-cta{width:100%;padding:0 12px;justify-content:center!important}
