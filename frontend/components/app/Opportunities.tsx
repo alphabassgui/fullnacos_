@@ -296,9 +296,50 @@ function DraftCta({ id }: { id: string }) {
   );
 }
 
+const REANALYZE_CSS = `
+.gv-reanalyze-spin{width:14px;height:14px;flex-shrink:0;border-radius:999px;border:2px solid var(--border);border-top-color:var(--primary);animation:gv-reanalyze-spin .8s linear infinite}
+@media (prefers-reduced-motion:reduce){.gv-reanalyze-spin{animation-duration:2.4s}}
+@keyframes gv-reanalyze-spin{to{transform:rotate(360deg)}}
+`;
+
+/** Quiet in-place status while a fresh audit runs over an existing board. */
+function ReanalyzingBanner() {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        padding: "10px 14px",
+        borderRadius: 10,
+        background: C.s1,
+        border: "1px solid " + C.border,
+        maxWidth: 720,
+      }}
+    >
+      <style href="gv-reanalyze" precedence="high">
+        {REANALYZE_CSS}
+      </style>
+      <span className="gv-reanalyze-spin" aria-hidden="true" />
+      <span style={{ fontFamily: BODY, fontSize: 13, lineHeight: "18px", color: C.secondary, textWrap: "pretty" }}>
+        Re-analyzing your site… I&apos;ll refresh these gaps when it&apos;s done.
+      </span>
+    </div>
+  );
+}
+
 /** The scrollable board: intro heading + subtitle, then the Priority Bento —
- *  highest impact first, hero at the top. */
-function OpportunitiesList({ opportunities }: { opportunities: FlaskOpportunity[] }) {
+ *  highest impact first, hero at the top. `reanalyzing` shows a quiet banner while
+ *  a fresh audit runs in the background, keeping the current results on screen. */
+function OpportunitiesList({
+  opportunities,
+  reanalyzing = false,
+}: {
+  opportunities: FlaskOpportunity[];
+  reanalyzing?: boolean;
+}) {
   const m = useIsMobile();
   const reduced = useReducedMotion();
   const sorted = sortByImpact(opportunities);
@@ -324,6 +365,7 @@ function OpportunitiesList({ opportunities }: { opportunities: FlaskOpportunity[
         gap: 32,
       }}
     >
+      {reanalyzing && <ReanalyzingBanner />}
       <div style={{ display: "flex", flexDirection: "column", gap: 8, maxWidth: 720 }}>
         <h2
           style={{
@@ -408,7 +450,8 @@ type View =
   | { kind: "detecting" }
   | { kind: "empty" } // dual-recovery: no business, or a business with no website
   | { kind: "analyzing" }
-  | { kind: "ready"; opportunities: FlaskOpportunity[] }
+  // reanalyzing = a fresh audit is running while an existing board stays on screen.
+  | { kind: "ready"; opportunities: FlaskOpportunity[]; reanalyzing?: boolean }
   | { kind: "noGaps" } // run finished (or site saved) with zero opportunities — offer a re-run
   | { kind: "error"; mode: "load" | "failed" | "timeout" };
 
@@ -457,10 +500,20 @@ function FlaskOpportunities({
     setView(opps.length > 0 ? { kind: "ready", opportunities: opps } : { kind: "noGaps" });
   }, []);
 
+  // `fallbackOpps` is the board already on screen (a re-run). On failure/timeout we
+  // keep it rather than wiping valid results with a full error screen.
   const startPolling = useCallback(
-    (id: string) => {
+    (id: string, fallbackOpps?: FlaskOpportunity[] | null) => {
       stopPolling();
       pollTicks.current = 0;
+      const giveUp = (mode: "failed" | "timeout") => {
+        stopPolling();
+        if (fallbackOpps && fallbackOpps.length > 0) {
+          setView({ kind: "ready", opportunities: fallbackOpps });
+        } else {
+          setView({ kind: "error", mode });
+        }
+      };
       pollTimer.current = window.setInterval(async () => {
         pollTicks.current += 1;
         const res = await getLatestRun(id);
@@ -475,13 +528,11 @@ function FlaskOpportunities({
           return;
         }
         if (outcome === "failed") {
-          stopPolling();
-          setView({ kind: "error", mode: "failed" });
+          giveUp("failed");
           return;
         }
         if (pollTicks.current >= POLL_MAX_TICKS) {
-          stopPolling();
-          setView({ kind: "error", mode: "timeout" });
+          giveUp("timeout");
         }
       }, POLL_INTERVAL_MS);
     },
@@ -511,8 +562,15 @@ function FlaskOpportunities({
       return;
     }
     if (run != null && outcome === "pending") {
-      setView({ kind: "analyzing" });
-      startPolling(businessId);
+      // A re-run with an existing board stays on the board (quiet "re-analyzing"
+      // banner); only a first run (no board yet) shows the full-screen spinner.
+      if (opps != null && opps.length > 0) {
+        setView({ kind: "ready", opportunities: opps, reanalyzing: true });
+        startPolling(businessId, opps);
+      } else {
+        setView({ kind: "analyzing" });
+        startPolling(businessId);
+      }
       return;
     }
     // Completed, or no run yet. Populated board wins (length as last-resort tiebreaker).
@@ -638,7 +696,7 @@ function FlaskOpportunities({
     );
   }
 
-  return <OpportunitiesList opportunities={view.opportunities} />;
+  return <OpportunitiesList opportunities={view.opportunities} reanalyzing={view.reanalyzing} />;
 }
 
 const retryButton: CSSProperties = {
