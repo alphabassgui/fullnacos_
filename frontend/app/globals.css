@@ -1868,13 +1868,13 @@ html[data-theme="dark"]{background:#02040A;position:relative;overflow-x:hidden}
 html[data-theme="dark"] body{background:radial-gradient(120% 60% at 50% 0%,#050A17 0%,#02040A 62%,#02040A 100%);position:relative;overflow-x:hidden}
 @supports (overflow-x:clip){html[data-theme="dark"],html[data-theme="dark"] body{overflow-x:clip}}
 html[data-theme="dark"] #root{position:relative;z-index:1}
-html[data-theme="dark"] body::before,html[data-theme="dark"] body::after,html[data-theme="dark"]::before,html[data-theme="dark"] #root::after{content:"";position:absolute;z-index:0;pointer-events:none;will-change:transform}
+html[data-theme="dark"] body::before,html[data-theme="dark"] body::after,html[data-theme="dark"] #root::before,html[data-theme="dark"] #root::after{content:"";position:absolute;z-index:0;pointer-events:none;will-change:transform}
 /* hero horizon — wide low bloom rising from the base of the hero, gone by mid-section */
 html[data-theme="dark"] body::before{left:50%;top:72vh;width:min(2600px,190vw);height:82vh;margin-left:calc(min(2600px,190vw) / -2);background:radial-gradient(ellipse 52% 100% at 50% 100%,rgba(24,93,241,.52) 0%,rgba(24,93,241,.26) 26%,rgba(24,93,241,.09) 52%,rgba(24,93,241,0) 78%);filter:blur(56px);animation:gv-horizon 30s ease-in-out infinite}
 /* faint broad ambient through the mid page so the black never goes flat */
 html[data-theme="dark"] body::after{left:50%;top:30%;width:min(1900px,150vw);height:1500px;margin-left:calc(min(1900px,150vw) / -2);border-radius:50%;background:radial-gradient(closest-side,rgba(91,140,240,.10),rgba(24,93,241,.035) 46%,rgba(24,93,241,0) 74%);filter:blur(110px);animation:gv-drift-a 34s ease-in-out infinite}
-/* echo horizon — base of the closing CTA / pricing zone */
-html[data-theme="dark"]::before{left:50%;bottom:560px;width:min(2200px,170vw);height:620px;margin-left:calc(min(2200px,170vw) / -2);background:radial-gradient(ellipse 50% 100% at 50% 100%,rgba(24,93,241,.30) 0%,rgba(24,93,241,.15) 28%,rgba(24,93,241,.05) 52%,rgba(24,93,241,0) 82%);filter:blur(96px);animation:gv-horizon 38s ease-in-out infinite}
+/* echo horizon — base of the closing CTA / pricing zone. Anchored to #root (not html::before) so the body overflow-x guard clips it; on the root element its horizontal overflow escapes the clip and lets the page pan sideways in dark mode. */
+html[data-theme="dark"] #root::before{left:50%;bottom:560px;width:min(2200px,170vw);height:620px;margin-left:calc(min(2200px,170vw) / -2);background:radial-gradient(ellipse 50% 100% at 50% 100%,rgba(24,93,241,.30) 0%,rgba(24,93,241,.15) 28%,rgba(24,93,241,.05) 52%,rgba(24,93,241,0) 82%);filter:blur(96px);animation:gv-horizon 38s ease-in-out infinite}
 /* fainter echo — base of the testimonials / closing content zone */
 html[data-theme="dark"] #root::after{left:50%;bottom:2180px;width:min(1800px,140vw);height:460px;margin-left:calc(min(1800px,140vw) / -2);background:radial-gradient(ellipse 50% 100% at 50% 100%,rgba(91,140,240,.16) 0%,rgba(24,93,241,.06) 34%,rgba(24,93,241,0) 74%);filter:blur(70px);animation:gv-drift-b 42s ease-in-out infinite}
 @keyframes gv-horizon{0%,100%{transform:translate3d(0,0,0) scaleX(1)}50%{transform:translate3d(0,-2.5%,0) scaleX(1.06)}}
