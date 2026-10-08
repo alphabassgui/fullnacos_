@@ -9,7 +9,15 @@ import { C, DISPLAY, BODY, MONO_EYEBROW, DashboardShell } from "./shell";
 import { InfoTip } from "@/components/ui/tooltip";
 import { useIsMobile } from "./use-media-query";
 import { useBusiness } from "@/lib/use-business";
-import { getOpportunities, type FlaskOpportunity } from "@/lib/api";
+import {
+  getOpportunities,
+  getLatestRun,
+  analyzeBusiness,
+  runOutcome,
+  type FlaskOpportunity,
+  type FlaskRun,
+  type ApiResult,
+} from "@/lib/api";
 import {
   categoryLabel,
   impactStyle,
@@ -17,6 +25,8 @@ import {
   DEMO_OPPORTUNITIES,
   SUBHEAD_STYLE,
 } from "./opportunities-data";
+import { AppLoader } from "./AppLoader";
+import { OpportunitiesEmptyState } from "./OpportunitiesEmptyState";
 
 /**
  * Opportunities — the anchor dashboard, ported pixel-for-pixel from the Claude
@@ -373,85 +383,262 @@ function CenteredNote({ children }: { children: React.ReactNode }) {
   );
 }
 
-/** Fetch + render the real opportunities for the current business (Flask mode). */
-function RealOpportunities({ businessId }: { businessId: string }) {
-  type Fetch =
-    | { phase: "loading" }
-    | { phase: "error" }
-    | { phase: "ready"; opportunities: FlaskOpportunity[] };
+/* ── Flask status helpers ─────────────────────────────────────────────────── */
 
-  const [state, setState] = useState<Fetch>({ phase: "loading" });
-  // Ignore results from a superseded fetch (business change, or a retry mid-flight).
+/** The latest analyze run from GET /runs/latest, or null when there is none. */
+function extractRun(res: ApiResult): FlaskRun | null {
+  if (!res.ok || !res.data || typeof res.data !== "object") return null;
+  const run = (res.data as { run?: FlaskRun | null }).run;
+  return run ?? null;
+}
+
+/** The opportunity list from GET /opportunities, or null when the fetch failed. */
+function extractOpps(res: ApiResult): FlaskOpportunity[] | null {
+  if (!res.ok || !res.data || typeof res.data !== "object") return null;
+  const list = (res.data as { opportunities?: FlaskOpportunity[] }).opportunities;
+  return Array.isArray(list) ? list : null;
+}
+
+// Poll cadence + ceiling for watching a run to completion. 4s × 45 ≈ 3 min, which
+// sits above apiFetch's own 60s per-request ceiling without adding new timeout logic.
+const POLL_INTERVAL_MS = 4000;
+const POLL_MAX_TICKS = 45;
+
+type View =
+  | { kind: "detecting" }
+  | { kind: "empty" } // dual-recovery: no business, or a business with no website
+  | { kind: "analyzing" }
+  | { kind: "ready"; opportunities: FlaskOpportunity[] }
+  | { kind: "noGaps" } // run finished (or site saved) with zero opportunities — offer a re-run
+  | { kind: "error"; mode: "load" | "failed" | "timeout" };
+
+/**
+ * The real Flask Opportunities experience: status-aware branching driven by the
+ * actual backend signals (GET /runs/latest classified via runOutcome, plus
+ * GET /opportunities), never by list length alone. Owns the current business id so
+ * the recovery flow can create a business and keep rendering here (no page reload),
+ * and polls a running audit to completion before swapping in the populated board.
+ */
+function FlaskOpportunities({
+  initialBusinessId,
+  websiteUrl,
+}: {
+  initialBusinessId: string | null;
+  websiteUrl: string | null;
+}) {
+  const [businessId, setBusinessId] = useState<string | null>(initialBusinessId);
+  const [view, setView] = useState<View>({ kind: "detecting" });
+
+  // Guards a superseded detect/refetch (business change or retry mid-flight).
   const reqId = useRef(0);
+  const pollTimer = useRef<number | null>(null);
+  const pollTicks = useRef(0);
+  // False after unmount — stops any in-flight fetch/poll from calling setState.
+  const alive = useRef(true);
 
-  const runFetch = useCallback(() => {
-    const id = ++reqId.current;
-    getOpportunities(businessId).then((result) => {
-      if (id !== reqId.current) return;
-      const list =
-        result.ok && result.data && typeof result.data === "object"
-          ? (result.data as { opportunities?: FlaskOpportunity[] }).opportunities
-          : null;
-      if (!result.ok || !Array.isArray(list)) {
-        setState({ phase: "error" });
+  const stopPolling = useCallback(() => {
+    if (pollTimer.current != null) {
+      window.clearInterval(pollTimer.current);
+      pollTimer.current = null;
+    }
+    pollTicks.current = 0;
+  }, []);
+
+  // Refetch opportunities once a run completes and show the board (or the no-gaps
+  // state). Never reloads the page — just swaps local state.
+  const loadOpportunities = useCallback(async (id: string) => {
+    const token = ++reqId.current;
+    const opps = extractOpps(await getOpportunities(id));
+    if (!alive.current || token !== reqId.current) return;
+    if (opps == null) {
+      setView({ kind: "error", mode: "load" });
+      return;
+    }
+    setView(opps.length > 0 ? { kind: "ready", opportunities: opps } : { kind: "noGaps" });
+  }, []);
+
+  const startPolling = useCallback(
+    (id: string) => {
+      stopPolling();
+      pollTicks.current = 0;
+      pollTimer.current = window.setInterval(async () => {
+        pollTicks.current += 1;
+        const res = await getLatestRun(id);
+        if (!alive.current) {
+          stopPolling();
+          return;
+        }
+        const outcome = runOutcome(extractRun(res));
+        if (outcome === "complete") {
+          stopPolling();
+          void loadOpportunities(id);
+          return;
+        }
+        if (outcome === "failed") {
+          stopPolling();
+          setView({ kind: "error", mode: "failed" });
+          return;
+        }
+        if (pollTicks.current >= POLL_MAX_TICKS) {
+          stopPolling();
+          setView({ kind: "error", mode: "timeout" });
+        }
+      }, POLL_INTERVAL_MS);
+    },
+    [stopPolling, loadOpportunities],
+  );
+
+  // Detect which state to show for the current business.
+  const detect = useCallback(async () => {
+    stopPolling();
+    const token = ++reqId.current;
+    setView({ kind: "detecting" });
+
+    if (businessId == null) {
+      setView({ kind: "empty" });
+      return;
+    }
+
+    const [runRes, oppRes] = await Promise.all([getLatestRun(businessId), getOpportunities(businessId)]);
+    if (!alive.current || token !== reqId.current) return;
+
+    const run = extractRun(runRes);
+    const opps = extractOpps(oppRes);
+    const outcome = runOutcome(run);
+
+    if (run != null && outcome === "failed") {
+      setView({ kind: "error", mode: "failed" });
+      return;
+    }
+    if (run != null && outcome === "pending") {
+      setView({ kind: "analyzing" });
+      startPolling(businessId);
+      return;
+    }
+    // Completed, or no run yet. Populated board wins (length as last-resort tiebreaker).
+    if (opps != null && opps.length > 0) {
+      setView({ kind: "ready", opportunities: opps });
+      return;
+    }
+    if (run != null && outcome === "complete") {
+      // A real run finished with zero gaps — distinct from skipped onboarding.
+      if (opps == null) {
+        setView({ kind: "error", mode: "load" });
         return;
       }
-      setState({ phase: "ready", opportunities: list });
-    });
-  }, [businessId]);
+      setView({ kind: "noGaps" });
+      return;
+    }
+    // No run yet: a business without a website is the skipped-audit recovery case;
+    // one that has a website but was never analyzed can simply run its first audit.
+    setView(websiteUrl ? { kind: "noGaps" } : { kind: "empty" });
+  }, [businessId, websiteUrl, startPolling, stopPolling]);
 
-  // Fetch on mount / business change. State is already "loading" (initial value),
-  // so the effect only kicks off the async request — no synchronous setState here.
-  // Staleness (overlapping fetches from a retry or a business change) is guarded by
-  // reqId inside runFetch, so no cleanup is needed.
+  // Run detection once on mount. Kicked off on a macrotask (not synchronously in
+  // the effect body) so the initial "detecting" state the UI already renders isn't
+  // re-set mid-commit. Later businessId changes come only from onAuditStarted /
+  // rerun below, which drive the view directly — so detect must NOT re-run on
+  // businessId change, which would cancel an in-flight poll and could bounce a
+  // freshly created business back to the empty state.
   useEffect(() => {
-    runFetch();
-  }, [runFetch]);
+    alive.current = true;
+    const kickoff = window.setTimeout(() => void detect(), 0);
+    return () => {
+      alive.current = false;
+      window.clearTimeout(kickoff);
+      stopPolling();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  const retry = useCallback(() => {
-    setState({ phase: "loading" });
-    runFetch();
-  }, [runFetch]);
+  // Recovery flow started an audit (and possibly created the business): adopt the
+  // id, flip to the analyzing loader, and poll — no reload.
+  const onAuditStarted = useCallback(
+    (id: string) => {
+      setBusinessId(id);
+      setView({ kind: "analyzing" });
+      startPolling(id);
+    },
+    [startPolling],
+  );
 
-  if (state.phase === "loading") {
-    return <CenteredNote><span style={{ fontSize: 14, color: C.muted }}>Loading your opportunities…</span></CenteredNote>;
+  // Re-run the audit from the no-gaps / timeout states (business already has a site).
+  const rerun = useCallback(async () => {
+    if (businessId == null) {
+      setView({ kind: "empty" });
+      return;
+    }
+    setView({ kind: "analyzing" });
+    const started = await analyzeBusiness(businessId);
+    if (!started.ok) {
+      setView({ kind: "error", mode: "failed" });
+      return;
+    }
+    startPolling(businessId);
+  }, [businessId, startPolling]);
+
+  if (view.kind === "detecting") {
+    return (
+      <CenteredNote>
+        <span style={{ fontSize: 14, color: C.muted }}>Loading your opportunities…</span>
+      </CenteredNote>
+    );
   }
 
-  if (state.phase === "error") {
+  if (view.kind === "empty") {
+    return <OpportunitiesEmptyState businessId={businessId} onAuditStarted={onAuditStarted} />;
+  }
+
+  if (view.kind === "analyzing") {
+    // Reuse the established cold-start loader ("Waking things up…") while the run works.
+    return (
+      <main style={{ flex: 1, overflowY: "auto", background: C.bg, display: "flex", minWidth: 0 }}>
+        <AppLoader />
+      </main>
+    );
+  }
+
+  if (view.kind === "error") {
+    const copy =
+      view.mode === "failed"
+        ? "The audit didn't finish. Give it another try."
+        : view.mode === "timeout"
+          ? "This is taking longer than usual. You can try the audit again."
+          : "Something went wrong reaching the server. Give it another try.";
+    const onRetry = view.mode === "load" ? () => void detect() : () => void rerun();
     return (
       <CenteredNote>
         <Icons name="alert-triangle" size={24} style={{ color: C.muted }} />
         <span style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 18, color: C.text }}>
-          I couldn&apos;t load your opportunities
+          {view.mode === "load" ? "I couldn't load your opportunities" : "The audit didn't finish"}
         </span>
-        <span style={{ fontSize: 14, lineHeight: "21px", color: C.secondary }}>
-          Something went wrong reaching the server. Give it another try.
-        </span>
-        <button type="button" onClick={retry} style={retryButton}>
+        <span style={{ fontSize: 14, lineHeight: "21px", color: C.secondary }}>{copy}</span>
+        <button type="button" onClick={onRetry} style={retryButton}>
           Try again
         </button>
       </CenteredNote>
     );
   }
 
-  if (state.opportunities.length === 0) {
+  if (view.kind === "noGaps") {
     return (
       <CenteredNote>
         <span style={MONO_EYEBROW}>Groville</span>
         <span style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 18, color: C.text }}>
-          No opportunities yet
+          No gaps found
         </span>
         <span style={{ fontSize: 14, lineHeight: "21px", color: C.secondary }}>
-          Once I finish reading your site, the gaps worth fixing show up here.
+          I read your site and didn&apos;t spot a gap worth chasing right now. Things change — re-run the
+          audit whenever you&apos;d like a fresh look.
         </span>
-        <Link href="/analysing" style={{ ...retryButton, textDecoration: "none" }}>
-          Run a scan
-        </Link>
+        <button type="button" onClick={() => void rerun()} style={retryButton}>
+          Re-run audit
+        </button>
       </CenteredNote>
     );
   }
 
-  return <OpportunitiesList opportunities={state.opportunities} />;
+  return <OpportunitiesList opportunities={view.opportunities} />;
 }
 
 const retryButton: CSSProperties = {
@@ -470,93 +657,6 @@ const retryButton: CSSProperties = {
   cursor: "pointer",
 };
 
-/**
- * Empty slate for a signed-in user who has no business yet (real Flask path).
- * Sends them to onboarding to add their website. Dashboard tokens + flat surface,
- * no glass. Honesty boundary kept: I read and draft, nothing goes live without approval.
- */
-function EmptyState() {
-  const m = useIsMobile();
-  return (
-    <main style={{ flex: 1, overflowY: "auto", background: C.bg, display: "flex" }}>
-      <div
-        style={{
-          margin: "auto",
-          width: "100%",
-          maxWidth: 560,
-          padding: m ? "40px 16px" : "48px 40px",
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "flex-start",
-          gap: 24,
-        }}
-      >
-        <span
-          style={{
-            width: 44,
-            height: 44,
-            borderRadius: 12,
-            background: C.s2,
-            border: "1px solid " + C.border,
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          <Icons name="globe" size={20} style={{ color: C.blueText }} />
-        </span>
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <span style={MONO_EYEBROW}>Groville</span>
-          <h1
-            style={{
-              margin: 0,
-              fontFamily: DISPLAY,
-              fontWeight: 600,
-              fontSize: m ? "clamp(26px, 8vw, 32px)" : 34,
-              lineHeight: m ? 1.15 : "42px",
-              letterSpacing: "-0.8px",
-              color: C.text,
-              textWrap: "pretty",
-            }}
-          >
-            Add your website and I&apos;ll find the customers you&apos;re{" "}
-            <em style={{ fontFamily: SERIF, fontStyle: "italic", fontWeight: 400, color: C.blueText }}>
-              missing
-            </em>
-            .
-          </h1>
-          <p style={{ margin: 0, fontSize: 15, lineHeight: "22px", color: C.secondary, maxWidth: 460 }}>
-            I read your public pages and Search Console to spot the searches you can win, then draft a
-            campaign for each one. Nothing goes live until you approve it.
-          </p>
-        </div>
-        <Link
-          href="/onboarding"
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 8,
-            minHeight: 44,
-            padding: "12px 22px",
-            width: m ? "100%" : undefined,
-            borderRadius: m ? 999 : 10,
-            textDecoration: "none",
-            background: C.blue,
-            color: C.onPrimary,
-            fontFamily: BODY,
-            fontWeight: 500,
-            fontSize: 15,
-          }}
-        >
-          Add your website
-          <Icons name="arrow-right" size={16} />
-        </Link>
-      </div>
-    </main>
-  );
-}
-
 /** Brief placeholder while the current business resolves (avoids flashing mock data). */
 function LoadingState() {
   return (
@@ -570,23 +670,29 @@ function LoadingState() {
  * Full Opportunities screen inside the shared dashboard shell.
  *
  * Demo mode (no NEXT_PUBLIC_API_BASE) renders the qualitative sample set so the
- * demo loop still runs. A signed-in Flask user with a business fetches and
- * renders the real opportunities; one with no business sees the empty slate
- * (so "Skip to my dashboard" lands here and stays) rather than a redirect.
+ * demo loop still runs. Every signed-in Flask path — a business with findings, a
+ * running audit, a finished run with no gaps, a failure, or no business/website at
+ * all — is handled by FlaskOpportunities, which branches on the real backend
+ * status (not list length) and offers in-place recovery without a page reload.
  */
 export function OpportunitiesScreen() {
   const business = useBusiness();
 
   let body: React.ReactNode;
-  if (business.status === "none") {
-    body = <EmptyState />;
-  } else if (business.status === "loading") {
+  if (business.status === "loading") {
     body = <LoadingState />;
-  } else if (business.status === "ready" && business.businessId) {
-    body = <RealOpportunities businessId={business.businessId} />;
-  } else {
-    // Demo mode (or a ready state without an id): the real-shaped sample set.
+  } else if (business.status === "demo") {
+    // Demo mode (no backend): the real-shaped sample set.
     body = <OpportunitiesList opportunities={DEMO_OPPORTUNITIES} />;
+  } else {
+    // Flask: "none" (no business) or "ready" (have one). FlaskOpportunities owns the
+    // status-aware branching and the dual-recovery empty state.
+    body = (
+      <FlaskOpportunities
+        initialBusinessId={business.status === "ready" ? business.businessId : null}
+        websiteUrl={business.status === "ready" ? business.business?.website_url ?? null : null}
+      />
+    );
   }
 
   return (
