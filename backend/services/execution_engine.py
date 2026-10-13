@@ -47,14 +47,17 @@ def execute_action(business_id, execution_id):
 
     action = action_doc.to_dict()
 
-    # Critical safety check
-    if action.get("status") != "approved":
+    # Critical safety check. Accept "approved" OR "running": once the action
+    # lifecycle is mirrored below, a retry of the same execution re-enters with
+    # the action already at "running", and must not raise. Anything terminal
+    # (completed/failed/rejected) or still pending is never re-executed here.
+    if action.get("status") not in {"approved", "running"}:
         raise ValueError(
             "Action must be approved before execution"
         )
 
     now = datetime.utcnow().isoformat()
-    
+
     if execution.get("status") not in {"queued", "running"}:
         raise ValueError(
             f"Execution cannot start from status: {execution.get('status')}"
@@ -62,6 +65,11 @@ def execute_action(business_id, execution_id):
     execution_ref.update({
         "status": "running",
         "started_at": now,
+        "updated_at": now,
+    })
+    # Mirror the lifecycle onto the action doc, which the Campaigns list reads.
+    action_ref.update({
+        "status": "running",
         "updated_at": now,
     })
 
@@ -75,11 +83,17 @@ def execute_action(business_id, execution_id):
             execution_id=execution_id,
         )
 
+        completed_now = datetime.utcnow().isoformat()
         execution_ref.update({
             "status": "completed",
             "result": result,
-            "completed_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat(),
+            "completed_at": completed_now,
+            "updated_at": completed_now,
+        })
+        action_ref.update({
+            "status": "completed",
+            "completed_at": completed_now,
+            "updated_at": completed_now,
         })
         measurement = record_measurement(
             business_id=business_id,
@@ -97,11 +111,17 @@ def execute_action(business_id, execution_id):
         return result
 
     except Exception as exc:
+        failed_now = datetime.utcnow().isoformat()
         execution_ref.update({
             "status": "failed",
             "error": str(exc),
-            "completed_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat(),
+            "completed_at": failed_now,
+            "updated_at": failed_now,
+        })
+        action_ref.update({
+            "status": "failed",
+            "error": str(exc),
+            "updated_at": failed_now,
         })
 
         raise

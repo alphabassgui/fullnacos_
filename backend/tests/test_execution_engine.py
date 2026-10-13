@@ -103,7 +103,9 @@ def test_execute_action_completed_social(execution_env):
 def test_execute_action_unrouted_type_marks_failed(execution_env):
     execution_engine, db = execution_env
     biz_ref = db.collection("businesses").document("b1")
-    biz_ref.collection("executions").document("e1").set({"action_id": "a1"})
+    biz_ref.collection("executions").document("e1").set(
+        {"action_id": "a1", "status": "queued"}
+    )
     biz_ref.collection("actions").document("a1").set(
         {"action_type": "email", "status": "approved"}
     )
@@ -120,6 +122,15 @@ def test_execute_action_unrouted_type_marks_failed(execution_env):
         == "No connector available for action type: email"
     )
     assert execution_ref.data["completed_at"]
+
+    # The action doc must mirror the failure, with the same error string.
+    action_ref = biz_ref.collection("actions").document("a1")
+    assert action_ref.data["status"] == "failed"
+    assert (
+        action_ref.data["error"]
+        == "No connector available for action type: email"
+    )
+    assert action_ref.data["updated_at"]
 
 
 def test_execute_action_missing_execution_raises(execution_env):
@@ -148,3 +159,82 @@ def test_execute_action_unapproved_action_raises(execution_env):
 
     with pytest.raises(ValueError, match="Action must be approved before execution"):
         execution_engine.execute_action("b1", "e1")
+
+
+class _FakeConnector:
+    """A connector stub that records nothing external — isolates the engine's
+    action-doc / gate logic from the real connector layer."""
+
+    def __init__(self, result):
+        self._result = result
+
+    def execute(self, action, business_id, user_id, execution_id=None):
+        return self._result
+
+
+def _stub_post_execute(execution_engine, monkeypatch):
+    """Stub the measurement + learning side effects so a completed execution
+    doesn't reach the real Firestore / Groq services over the network."""
+    monkeypatch.setattr(
+        execution_engine, "record_measurement", lambda **kwargs: {"id": "m1"}
+    )
+    monkeypatch.setattr(
+        execution_engine,
+        "create_learning_from_measurement",
+        lambda **kwargs: {"id": "l1"},
+    )
+
+
+def test_execute_action_writes_completed_to_action(execution_env, monkeypatch):
+    # The real fix: on a completed execution the ACTION doc (which the Campaigns
+    # list reads) must also reach "completed", so the UI leaves "Running".
+    execution_engine, db = execution_env
+    biz_ref = db.collection("businesses").document("b1")
+    biz_ref.collection("executions").document("e1").set(
+        {"action_id": "a1", "status": "queued"}
+    )
+    biz_ref.collection("actions").document("a1").set(
+        {"action_type": "website", "status": "approved"}
+    )
+
+    monkeypatch.setattr(
+        execution_engine,
+        "get_connector",
+        lambda action: _FakeConnector({"success": True, "status": "ok"}),
+    )
+    _stub_post_execute(execution_engine, monkeypatch)
+
+    execution_engine.execute_action("b1", "e1")
+
+    execution_ref = biz_ref.collection("executions").document("e1")
+    action_ref = biz_ref.collection("actions").document("a1")
+    assert execution_ref.data["status"] == "completed"
+    assert action_ref.data["status"] == "completed"
+    assert action_ref.data["completed_at"]
+    assert action_ref.data["updated_at"]
+
+
+def test_execute_action_running_action_retry_safe(execution_env, monkeypatch):
+    # Retry-safety: a re-queued execution re-enters with the action already at
+    # "running" (the first attempt mirrored the lifecycle onto the action). It
+    # must execute, not raise "Action must be approved before execution".
+    execution_engine, db = execution_env
+    biz_ref = db.collection("businesses").document("b1")
+    biz_ref.collection("executions").document("e1").set(
+        {"action_id": "a1", "status": "queued"}
+    )
+    biz_ref.collection("actions").document("a1").set(
+        {"action_type": "website", "status": "running"}
+    )
+
+    monkeypatch.setattr(
+        execution_engine,
+        "get_connector",
+        lambda action: _FakeConnector({"success": True, "status": "ok"}),
+    )
+    _stub_post_execute(execution_engine, monkeypatch)
+
+    execution_engine.execute_action("b1", "e1")
+
+    assert biz_ref.collection("executions").document("e1").data["status"] == "completed"
+    assert biz_ref.collection("actions").document("a1").data["status"] == "completed"
