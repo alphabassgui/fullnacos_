@@ -702,7 +702,10 @@ export function Onboarding({ initialStep = 0 }: { initialStep?: number }) {
                 step === TOTAL - 1 ? (submitting ? "Creating…" : "Analyze my site") : "Continue"
               }
             />
-            {step === TOTAL - 1 && (
+            {/* Demo mode only: in Flask mode, skipping here leaves the user with no
+                business and bounces them straight back to the Opportunities recovery
+                card (a loop), so we require finishing the short setup instead. */}
+            {step === TOTAL - 1 && !isFlaskConfigured() && (
               <button
                 type="button"
                 onClick={() => {

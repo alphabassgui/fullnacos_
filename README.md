@@ -68,6 +68,7 @@ The **full demo loop runs end to end on real data**:
 - ✅ **Onboarding** → create a business from a website
 - ✅ **Analyze** the website (async, via Celery + Groq)
 - ✅ **Opportunities** — real, ranked customer/search gaps
+  - **Recovery + re-run:** if a user lands on the dashboard without an audit (e.g. they skipped onboarding), they can **add a website and run the audit right there** (a modal, no need to redo onboarding), or **re-run the audit any time** from the board. While a run works, the page shows a real in-dashboard **"Analysing → Reading your site"** state (not a generic loader), and a re-run keeps existing results on screen until the fresh ones arrive.
 - ✅ **Campaign draft** → **approve** → **execute** → **measure**
 - ✅ **Results** — real measurements + learnings
 - ✅ **Connections** — Website (read), Google Search Console (read), **GitHub** (OAuth)

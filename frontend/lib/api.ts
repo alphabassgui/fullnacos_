@@ -200,6 +200,20 @@ export function listBusinesses(): Promise<ApiResult> {
   return apiFetch("/api/business");
 }
 
+/**
+ * PATCH /api/business/<id> → 200 {success, business:{...}}. Partial update; send only
+ * the fields to change. Used by the Opportunities recovery flow to attach a `website_url`
+ * to an existing business (one created during onboarding but never given a site), so the
+ * analyze run can be triggered. Flask validates `website_url` server-side and 400s an
+ * invalid URL; the raw ApiResult is returned so the caller can surface that inline.
+ */
+export function updateBusiness(
+  id: string,
+  body: { website_url?: string; name?: string; industry?: string; description?: string },
+): Promise<ApiResult> {
+  return apiFetch(`/api/business/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+}
+
 /* ── Analyze pipeline ─────────────────────────────────────────────────────
  * The pipeline is ASYNC (Celery): trigger → poll. `analyzeBusiness` kicks off a
  * run; `getLatestRun` is polled until the run finishes; `getOpportunities`
