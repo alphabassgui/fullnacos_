@@ -497,9 +497,11 @@ export function getLearnings(
  * may read. All cookie-auth, so they go through apiFetch (credentials:'include').
  * There is NO /status route: the caller derives connected-ness from
  * githubRepositories() — 200 means connected, a 404 "GitHub connection not
- * found" means not connected. There is also no disconnect endpoint, so the UI
- * offers none. Honesty boundary: connecting only LINKS the account; nothing is
- * published or run without an explicit approve elsewhere in the app.
+ * found" means not connected. There IS a disconnect endpoint
+ * (DELETE /connection, see githubDisconnect), which the UI exposes behind a
+ * confirm step; a 404 there means the connection was already gone. Honesty
+ * boundary: connecting only LINKS the account; nothing is published or run
+ * without an explicit approve elsewhere in the app.
  * ------------------------------------------------------------------------- */
 
 /**
@@ -548,5 +550,19 @@ export function githubSetRepository(businessId: string, fullName: string): Promi
   return apiFetch(`/api/connections/github/repository?business_id=${encodeURIComponent(businessId)}`, {
     method: "PATCH",
     body: JSON.stringify({ repository: fullName }),
+  });
+}
+
+/**
+ * DELETE /api/connections/github/connection?business_id=<id> → 200
+ * {success:true} on removal; 404 {success:false, error:"GitHub connection not
+ * found"} when nothing was connected; 401 when not authenticated; 400/403/500
+ * otherwise. Returns the raw ApiResult so the caller can treat 200 and
+ * 404-already-gone alike (both leave GitHub unlinked) and surface any other
+ * status as a generic error.
+ */
+export function githubDisconnect(businessId: string): Promise<ApiResult> {
+  return apiFetch(`/api/connections/github/connection?business_id=${encodeURIComponent(businessId)}`, {
+    method: "DELETE",
   });
 }
