@@ -13,6 +13,7 @@ import {
   githubConnect,
   githubRepositories,
   githubSetRepository,
+  githubDisconnect,
   type FlaskGithubRepository,
 } from "@/lib/api";
 
@@ -36,7 +37,9 @@ import {
  *   200 → connected (the list drives the repo picker)
  *   404 "GitHub connection not found" → not connected
  *   401 → not authenticated, route to /login like the rest of the app.
- * There is no disconnect endpoint, so no disconnect control is offered.
+ * The connected state offers a confirm-gated "Disconnect GitHub" control
+ * (DELETE /connection); on a 200 or a 404 (already gone) the card returns to
+ * the not-connected state.
  *
  * Visual language matches the other dashboards: flat solid surfaces (no
  * glass/blur), dashboard tokens via `C`, both themes, mobile-pill / desktop
@@ -135,15 +138,19 @@ function ActionButton({
   onClick,
   variant = "primary",
   disabled,
+  danger,
   m,
 }: {
   children: ReactNode;
   onClick?: () => void;
   variant?: "primary" | "secondary";
   disabled?: boolean;
+  /** Destructive emphasis for the secondary variant: error-token border + text. */
+  danger?: boolean;
   m: boolean;
 }) {
   const primary = variant === "primary";
+  const dangerOutline = !primary && danger;
   return (
     <button
       type="button"
@@ -162,8 +169,8 @@ function ActionButton({
         cursor: disabled ? "not-allowed" : "pointer",
         opacity: disabled ? 0.55 : 1,
         background: primary ? C.blue : "transparent",
-        border: primary ? "none" : "1px solid " + C.border,
-        color: primary ? C.onPrimary : C.text,
+        border: primary ? "none" : "1px solid " + (dangerOutline ? C.bad : C.border),
+        color: primary ? C.onPrimary : dangerOutline ? C.bad : C.text,
         fontFamily: BODY,
         fontWeight: 500,
         fontSize: 15,
@@ -386,6 +393,8 @@ function GithubConnection({ businessId }: { businessId: string }) {
   const [selected, setSelected] = useState<{ repository: string; default_branch: string } | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [savingRepo, setSavingRepo] = useState<string | null>(null);
+  const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
   const [toast, setToast] = useState<Toast | null>(null);
 
   // Ignore results from a superseded status fetch (business change / retry).
@@ -508,6 +517,27 @@ function GithubConnection({ businessId }: { businessId: string }) {
     [businessId, savingRepo, router, showToast],
   );
 
+  const disconnect = useCallback(() => {
+    if (disconnecting) return;
+    setDisconnecting(true);
+    githubDisconnect(businessId).then((result) => {
+      if (result.status === 401) {
+        router.replace(LOGIN_HREF);
+        return;
+      }
+      // 200 removed, or 404 already gone — both leave GitHub unlinked.
+      if (result.ok || result.status === 404) {
+        setSelected(null);
+        setConfirmingDisconnect(false);
+        setPhase({ kind: "not_connected" });
+        showToast("success", "GitHub disconnected. You can connect again anytime.");
+      } else {
+        showToast("error", "I couldn't disconnect GitHub. Give it another try.");
+      }
+      setDisconnecting(false);
+    });
+  }, [businessId, disconnecting, router, showToast]);
+
   const chipState: ConnState =
     phase.kind === "connected"
       ? "connected"
@@ -591,6 +621,33 @@ function GithubConnection({ businessId }: { businessId: string }) {
         <p style={NOTE_STYLE}>
           I only read the repository you pick. I never merge or publish · every change waits for your approval.
         </p>
+
+        <div style={{ borderTop: "1px solid " + C.border, paddingTop: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+          {!confirmingDisconnect ? (
+            <ActionButton variant="secondary" onClick={() => setConfirmingDisconnect(true)} m={m}>
+              Disconnect GitHub
+            </ActionButton>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <p style={{ ...NOTE_STYLE, color: C.bad }}>
+                This unlinks GitHub · you&apos;ll re-authorize to reconnect.
+              </p>
+              <div style={{ display: "flex", flexDirection: m ? "column" : "row", gap: 10 }}>
+                <ActionButton
+                  variant="secondary"
+                  onClick={() => setConfirmingDisconnect(false)}
+                  disabled={disconnecting}
+                  m={m}
+                >
+                  Cancel
+                </ActionButton>
+                <ActionButton variant="secondary" danger onClick={disconnect} disabled={disconnecting} m={m}>
+                  {disconnecting ? "Disconnecting…" : "Disconnect"}
+                </ActionButton>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     );
   }
