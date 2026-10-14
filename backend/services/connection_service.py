@@ -162,6 +162,63 @@ def get_connection(
         "access_token": access_token,
     }
     
+def delete_connection(
+    business_id,
+    user_id,
+    provider,
+):
+    """
+    Hard-delete the stored connection(s) for a provider on a business.
+
+    Removes every matching "connected" connection doc from Firestore so no
+    stale connection survives. Returns the number of docs deleted (an int);
+    0 means nothing was connected.
+    """
+
+    business_ref = (
+        db.collection("businesses")
+        .document(business_id)
+    )
+
+    business_doc = business_ref.get()
+
+    if not business_doc.exists:
+        raise ValueError("Business not found")
+
+    business = business_doc.to_dict()
+
+    if business.get("owner_id") != user_id:
+        raise PermissionError(
+            "You do not have permission to modify this business"
+        )
+
+    connections = (
+        business_ref
+        .collection("connections")
+        .where(
+            "provider",
+            "==",
+            provider,
+        )
+        .where(
+            "status",
+            "==",
+            "connected",
+        )
+        .stream()
+    )
+
+    deleted = 0
+
+    for connection_doc in connections:
+        # TODO: GitHub-side OAuth token revocation can be added here later.
+        # The MVP only removes the stored Firestore connection doc.
+        connection_doc.reference.delete()
+        deleted += 1
+
+    return deleted
+
+
 def create_github_connection(
     business_id,
     user_id,

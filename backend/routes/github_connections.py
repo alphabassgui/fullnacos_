@@ -265,3 +265,62 @@ def select_github_repository():
             "success": False,
             "error": str(exc),
         }), 500
+
+
+@github_connections_bp.route(
+    "/api/connections/github/connection",
+    methods=["DELETE"],
+)
+def disconnect_github_connection():
+    user_id = session.get("user_id")
+
+    if not user_id:
+        return jsonify({
+            "success": False,
+            "error": "Authentication required",
+        }), 401
+
+    business_id = request.args.get("business_id")
+
+    if not business_id:
+        return jsonify({
+            "success": False,
+            "error": "Missing business_id",
+        }), 400
+
+    try:
+        from services.connection_service import delete_connection
+
+        deleted = delete_connection(
+            business_id=business_id,
+            user_id=user_id,
+            provider="github",
+        )
+
+        if deleted == 0:
+            return jsonify({
+                "success": False,
+                "error": "GitHub connection not found",
+            }), 404
+
+        return jsonify({
+            "success": True,
+        })
+
+    except PermissionError as exc:
+        return jsonify({
+            "success": False,
+            "error": str(exc),
+        }), 403
+
+    except ValueError as exc:
+        return jsonify({
+            "success": False,
+            "error": str(exc),
+        }), 400
+
+    except Exception as exc:
+        return jsonify({
+            "success": False,
+            "error": str(exc),
+        }), 500
