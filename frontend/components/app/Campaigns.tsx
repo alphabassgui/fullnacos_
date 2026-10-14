@@ -28,6 +28,20 @@ import { typeLabel, statusMeta, statusRank, type StatusTone, DEMO_ACTION } from 
 
 const SERIF = "var(--font-serif)";
 
+/** Real-pipeline poll interval, matching Analysing.tsx (POLL_MS). */
+const POLL_MS = 3500;
+
+/** Terminal statuses — an action at one of these has finished moving. */
+const TERMINAL_STATUSES = new Set(["completed", "failed", "rejected"]);
+
+/** True once every action has reached a terminal status (empty list = done). */
+function allTerminal(actions: FlaskAction[]): boolean {
+  return actions.every((a) => {
+    const v = typeof a.status === "string" ? a.status.trim().toLowerCase() : "";
+    return TERMINAL_STATUSES.has(v);
+  });
+}
+
 /** A drafted action's link into its own campaign draft. */
 function draftHref(opportunityId: string): string {
   return `/campaign-draft?opportunity=${encodeURIComponent(opportunityId)}`;
@@ -285,11 +299,30 @@ function RealCampaigns({ businessId }: { businessId: string }) {
 
   const [state, setState] = useState<Fetch>({ phase: "loading" });
   const reqId = useRef(0);
+  // False after unmount — stops any in-flight fetch from calling setState.
+  const mounted = useRef(true);
+  // Pending next-poll timer, so cleanup / retry can cancel it.
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Holds the latest runFetch so the self-rescheduling poll can call it without
+  // runFetch referencing itself at declaration time (assigned in an effect below).
+  const pollRef = useRef<(() => void) | null>(null);
+
+  const clearTimer = useCallback(() => {
+    if (timer.current != null) {
+      clearTimeout(timer.current);
+      timer.current = null;
+    }
+  }, []);
+
+  // Fetch the actions once. While any action is still non-terminal, re-schedule
+  // another fetch POLL_MS later so the list reflects running → completed|failed
+  // without a manual reload. reqId drops stale/overlapping responses; the poll
+  // stops on a terminal list, a fetch error, or unmount.
   const runFetch = useCallback(() => {
     const id = ++reqId.current;
     listActions(businessId).then((result) => {
-      if (id !== reqId.current) return;
+      if (!mounted.current || id !== reqId.current) return;
       const list =
         result.ok && result.data && typeof result.data === "object"
           ? (result.data as { actions?: FlaskAction[] }).actions
@@ -299,17 +332,30 @@ function RealCampaigns({ businessId }: { businessId: string }) {
         return;
       }
       setState({ phase: "ready", actions: list });
+      if (!allTerminal(list)) {
+        timer.current = setTimeout(() => pollRef.current?.(), POLL_MS);
+      }
     });
   }, [businessId]);
 
   useEffect(() => {
-    runFetch();
+    pollRef.current = runFetch;
   }, [runFetch]);
 
+  useEffect(() => {
+    mounted.current = true;
+    runFetch();
+    return () => {
+      mounted.current = false;
+      clearTimer();
+    };
+  }, [runFetch, clearTimer]);
+
   const retry = useCallback(() => {
+    clearTimer();
     setState({ phase: "loading" });
     runFetch();
-  }, [runFetch]);
+  }, [runFetch, clearTimer]);
 
   if (state.phase === "loading") {
     return (

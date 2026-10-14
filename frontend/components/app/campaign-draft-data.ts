@@ -38,29 +38,38 @@ export function confidenceLabel(value: number): string {
 
 /**
  * Status → a small badge label + tone, shared by the Campaigns list. Tones match
- * the campaign-draft Tag palette (blue / good / bad / neutral). Unknown statuses
- * fall back to the pending look.
+ * the campaign-draft Tag palette (blue / good / bad / neutral). Maps the real
+ * backend lifecycle without collapsing distinct states:
+ *   - needs approval: pending_approval, awaiting_approval (the owner must act).
+ *   - accepted & waiting to run: approved, queued ("Queued").
+ *   - running: running (actually executing).
+ *   - terminal: completed (good), failed (bad), rejected (neutral).
+ * Unknown statuses fall back to the needs-approval look.
  */
 export type StatusTone = "blue" | "good" | "bad" | "neutral";
 export function statusMeta(status: string): { label: string; tone: StatusTone } {
   const v = typeof status === "string" ? status.trim().toLowerCase() : "";
-  if (v === "approved" || v === "running") return { label: "Running", tone: "blue" };
+  if (v === "pending_approval" || v === "awaiting_approval") return { label: "Needs your approval", tone: "blue" };
+  if (v === "approved" || v === "queued") return { label: "Queued", tone: "blue" };
+  if (v === "running") return { label: "Running", tone: "blue" };
   if (v === "completed") return { label: "Completed", tone: "good" };
   if (v === "failed") return { label: "Failed", tone: "bad" };
   if (v === "rejected") return { label: "Rejected", tone: "neutral" };
   return { label: "Needs your approval", tone: "blue" };
 }
 
-/** Sort rank for the Campaigns list — most actionable (pending) first. */
+/** Sort rank for the Campaigns list — most actionable (needs approval) first. */
 export function statusRank(status: string): number {
   const v = typeof status === "string" ? status.trim().toLowerCase() : "";
   const order: Record<string, number> = {
     pending_approval: 0,
+    awaiting_approval: 0,
     approved: 1,
-    running: 1,
-    completed: 2,
-    failed: 3,
-    rejected: 4,
+    queued: 1,
+    running: 2,
+    completed: 3,
+    failed: 4,
+    rejected: 5,
   };
   return order[v] ?? 0;
 }
