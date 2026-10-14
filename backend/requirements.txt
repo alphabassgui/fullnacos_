@@ -20,7 +20,9 @@ flask-cors==6.0.5
 Flask-Migrate==4.1.0
 Flask-SQLAlchemy==3.1.1
 google-api-core==2.37.0
+google-api-python-client==2.149.0
 google-auth==2.58.0
+google-auth-oauthlib==1.2.1
 google-cloud-core==2.7.0
 google-cloud-firestore==2.30.0
 google-cloud-storage==3.14.1
