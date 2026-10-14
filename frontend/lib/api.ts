@@ -59,15 +59,17 @@ export type FlaskUser = {
  * turns into { state: "unknown" }. Callers may override timeoutMs.
  */
 async function apiFetch(path: string, init: RequestInit = {}, timeoutMs = 60000): Promise<ApiResult> {
-  const base = getApiBase();
-  if (!base) throw new Error("NEXT_PUBLIC_API_BASE is not configured");
+  if (!getApiBase()) throw new Error("NEXT_PUBLIC_API_BASE is not configured");
 
   const hasBody = init.body != null;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let res: Response;
   try {
-    res = await fetch(base + path, {
+    // Route through the Next.js rewrite proxy so the session cookie is
+    // first-party (same origin) and never blocked by Safari ITP / Firefox ETP.
+    // The rewrite in next.config.ts forwards /api/backend/* → NEXT_PUBLIC_API_BASE/*.
+    res = await fetch("/api/backend" + path, {
       ...init,
       credentials: "include",
       signal: controller.signal,
