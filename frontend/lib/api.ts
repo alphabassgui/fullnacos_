@@ -568,3 +568,76 @@ export function githubDisconnect(businessId: string): Promise<ApiResult> {
     method: "DELETE",
   });
 }
+
+/* ── Google Search Console connection ───────────────────────────────────────
+ * Linking a business to Google Search Console, picking which property Groville
+ * may read, and reading back that property's recent search analytics. All
+ * cookie-auth, so they go through apiFetch (credentials:'include'). Like GitHub
+ * there is NO /status route: the caller derives connected-ness from
+ * searchConsoleProperties() — 200 means connected, a 404 "Google Search Console
+ * not connected" means not connected. Honesty boundary: connecting only lets me
+ * READ Search Console data to display it; it does not make the audit smarter and
+ * nothing is sent, published or run on its own.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * A Search Console property as GET /properties returns it (inside `properties`).
+ * `site_url` is the property identifier POST /select-property expects;
+ * `permission_level` (e.g. "siteOwner", "siteFullUser") is shown to the owner.
+ */
+export type FlaskSearchConsoleProperty = { site_url: string; permission_level: string };
+
+/**
+ * One analytics row as GET /analytics returns it (inside `top_queries` /
+ * `top_pages`). `keys[0]` is the query or page; `ctr` is a 0–1 ratio and
+ * `position` the average rank. Totals share the same numeric shape.
+ */
+export type FlaskSearchConsoleRow = { keys: string[]; clicks: number; impressions: number; ctr: number; position: number };
+
+/**
+ * GET /api/connections/search-console/connect?business_id=<id> → 200
+ * {success, authorization_url}. The caller reads authorization_url and does a
+ * full-page redirect (window.location.href) to start the OAuth flow. 401 auth;
+ * 400 when business_id is missing; 403 not owner; 404 business not found.
+ * Returns the raw ApiResult so the caller can branch on status.
+ */
+export function searchConsoleConnect(businessId: string): Promise<ApiResult> {
+  return apiFetch(`/api/connections/search-console/connect?business_id=${encodeURIComponent(businessId)}`);
+}
+
+/**
+ * GET /api/connections/search-console/properties?business_id=<id> → 200
+ * {success, properties:[{site_url, permission_level}, ...]}. Doubles as the
+ * STATUS check: 404 {error:"Google Search Console not connected"} means NOT
+ * connected, 401 means not authenticated. Returns the raw ApiResult so the
+ * caller can tell 404 (not connected) apart from 401 (login) and other errors.
+ */
+export function searchConsoleProperties(businessId: string): Promise<ApiResult> {
+  return apiFetch(`/api/connections/search-console/properties?business_id=${encodeURIComponent(businessId)}`);
+}
+
+/**
+ * POST /api/connections/search-console/select-property with
+ * {business_id, site_url} → 200 {success, message, site_url}. Sets which
+ * property Groville reads. 400 missing field; 404 not connected; 403 property
+ * not accessible. Returns the raw ApiResult so the caller can surface a failure
+ * inline.
+ */
+export function searchConsoleSelectProperty(businessId: string, siteUrl: string): Promise<ApiResult> {
+  return apiFetch(`/api/connections/search-console/select-property`, {
+    method: "POST",
+    body: JSON.stringify({ business_id: businessId, site_url: siteUrl }),
+  });
+}
+
+/**
+ * GET /api/connections/search-console/analytics?business_id=<id> → 200
+ * {success, site_url, start_date, end_date, top_queries:[row...],
+ * top_pages:[row...], totals:{clicks,impressions,ctr,position}, rows_returned}.
+ * The window is the last 28 complete days (ends today−3). 400 when no property
+ * is selected yet; 404 not connected; 403; 500. Returns the raw ApiResult so
+ * the caller can render read-only Search Console data and degrade gracefully.
+ */
+export function searchConsoleAnalytics(businessId: string): Promise<ApiResult> {
+  return apiFetch(`/api/connections/search-console/analytics?business_id=${encodeURIComponent(businessId)}`);
+}
