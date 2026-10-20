@@ -39,11 +39,20 @@ app.config["DEBUG"] = os.getenv("DEBUG", "True").lower() == "true"
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
 
-# Session configuration for security
+# Session configuration for security.
+# Defaults are production-safe (Secure + SameSite=None, which the Vercel reverse
+# proxy makes first-party so Safari ITP doesn't drop it). Local http dev can
+# override via env (SESSION_COOKIE_SECURE=False) since browsers won't store a
+# Secure cookie over http://localhost.
+cookie_secure = os.getenv("SESSION_COOKIE_SECURE", "True").lower() == "true"
+cookie_samesite = os.getenv("SESSION_COOKIE_SAMESITE", "None")
+# Browsers reject SameSite=None without Secure; fall back to Lax for local http.
+if not cookie_secure and cookie_samesite == "None":
+    cookie_samesite = "Lax"
 app.config.update(
-    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_SECURE=cookie_secure,
     SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE='None'
+    SESSION_COOKIE_SAMESITE=cookie_samesite,
 )
 
 
