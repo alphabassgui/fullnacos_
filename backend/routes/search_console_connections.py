@@ -1,7 +1,7 @@
 import os
-import secrets
 from datetime import datetime, timezone
 from flask import Blueprint, jsonify, redirect, request, session, current_app
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from services.connection_service import create_connection
 
 from firebase import db
@@ -9,6 +9,14 @@ from connectors.google_search_console import GoogleSearchConsoleAPI
 
 # Where to send the browser back to after the OAuth callback.
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+
+def _oauth_serializer():
+    # Signs the OAuth state with the app SECRET_KEY so the callback can trust the
+    # user_id/business_id inside it without relying on the session cookie -- which
+    # is NOT sent to the backend domain on the cross-site OAuth redirect in prod
+    # (frontend is first-party to vercel.app, callback lands on onrender.com).
+    return URLSafeTimedSerializer(os.getenv("SECRET_KEY"), salt="search-console-oauth-state")
 
 
 search_console_connections_bp = Blueprint(
@@ -58,16 +66,15 @@ def search_console_connect():
             "error": "You do not own this business",
         }), 403
 
-    state = secrets.token_urlsafe(32)
+    # Sign who + which business into the OAuth state. Google echoes this back to
+    # the callback unchanged, so the callback can trust it (signature-verified)
+    # without needing the session cookie.
+    state = _oauth_serializer().dumps({
+        "user_id": user_id,
+        "business_id": business_id,
+    })
 
-    session["search_console_oauth_state"] = state
-    session["search_console_oauth_business_id"] = business_id
-
-    authorization_url, code_verifier = (
-        GoogleSearchConsoleAPI.get_authorization_url(state)
-    )
-
-    session["search_console_oauth_code_verifier"] = code_verifier
+    authorization_url = GoogleSearchConsoleAPI.get_authorization_url(state)
 
     return jsonify({
         "success": True,
@@ -79,51 +86,28 @@ def search_console_connect():
     methods=["GET"],
 )
 def search_console_callback():
-    user_id = session.get("user_id")
-
-    if not user_id:
-        return redirect(f"{FRONTEND_URL}/connections?search_console=error")
-
     # Handle authorization errors returned by Google.
     if request.args.get("error"):
-        session.pop("search_console_oauth_state", None)
-        session.pop("search_console_oauth_business_id", None)
-
         return redirect(f"{FRONTEND_URL}/connections?search_console=error")
 
     code = request.args.get("code")
     state = request.args.get("state")
-    expected_state = session.get("search_console_oauth_state")
 
     if not code or not state:
         return redirect(f"{FRONTEND_URL}/connections?search_console=error")
 
-    if not expected_state or not secrets.compare_digest(
-        state,
-        expected_state,
-    ):
+    # Verify + decode the signed state (valid for 10 minutes). No session needed:
+    # the OAuth callback is a cross-site redirect to the backend domain, where the
+    # frontend-domain session cookie isn't sent.
+    try:
+        payload = _oauth_serializer().loads(state, max_age=600)
+    except (BadSignature, SignatureExpired):
         return redirect(f"{FRONTEND_URL}/connections?search_console=error")
 
-    # Consume state once validated.
+    user_id = payload.get("user_id")
+    business_id = payload.get("business_id")
 
-    # Consume OAuth state and PKCE verifier once validated.
-    session.pop("search_console_oauth_state", None)
-
-    business_id = session.pop(
-        "search_console_oauth_business_id",
-        None,
-    )
-
-    code_verifier = session.pop(
-        "search_console_oauth_code_verifier",
-        None,
-    )
-
-    if not code_verifier:
-        return redirect(f"{FRONTEND_URL}/connections?search_console=error")
-
-
-    if not business_id:
+    if not user_id or not business_id:
         return redirect(f"{FRONTEND_URL}/connections?search_console=error")
 
     business_ref = (
@@ -146,7 +130,6 @@ def search_console_callback():
             GoogleSearchConsoleAPI.exchange_code_for_credentials(
                 code=code,
                 state=state,
-                code_verifier=code_verifier,
             )
         )
 
