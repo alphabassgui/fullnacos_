@@ -39,10 +39,15 @@ class GoogleSearchConsoleAPI:
             }
         }
 
+        # No PKCE: this is a confidential client (has a client secret), so the
+        # client_secret authenticates the token exchange. Disabling PKCE means
+        # there is no code_verifier to carry across the OAuth round-trip, so the
+        # callback needs nothing from the Flask session (mirrors the GitHub flow).
         flow = Flow.from_client_config(
             client_config,
             scopes=[GOOGLE_SEARCH_CONSOLE_SCOPE],
             state=state,
+            autogenerate_code_verifier=False,
         )
 
         flow.redirect_uri = os.environ[
@@ -56,18 +61,19 @@ class GoogleSearchConsoleAPI:
     @staticmethod
     def get_authorization_url(state):
         flow = GoogleSearchConsoleAPI.create_oauth_flow(state=state)
+        # No include_granted_scopes: it makes Google echo back any other scopes
+        # the account has already granted, which trips oauthlib's "Scope has
+        # changed" check during the token exchange.
         authorization_url, _ = flow.authorization_url(
             access_type="offline",
-            include_granted_scopes="true",
             prompt="consent",
         )
-        return authorization_url, flow.code_verifier
+        return authorization_url
 
 
     @staticmethod
-    def exchange_code_for_credentials(code, state, code_verifier):
+    def exchange_code_for_credentials(code, state):
         flow = GoogleSearchConsoleAPI.create_oauth_flow(state=state)
-        flow.code_verifier = code_verifier
         flow.fetch_token(code=code)
         return flow.credentials
 
