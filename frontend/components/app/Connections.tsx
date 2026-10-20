@@ -1503,8 +1503,8 @@ function ConnectionsBody() {
     gscCard = <GscCard state="loading" body={<p style={NOTE_STYLE}>Loading your dashboard…</p>} m={m} />;
     githubCard = <GithubCard state="loading" body={<p style={NOTE_STYLE}>Loading your dashboard…</p>} m={m} />;
   } else if (business.status === "ready" && business.businessId) {
-    gscCard = <SearchConsoleConnection key={business.businessId} businessId={business.businessId} showToast={showToast} />;
-    githubCard = <GithubConnection key={business.businessId} businessId={business.businessId} showToast={showToast} />;
+    gscCard = <SearchConsoleConnection key={`gsc-${business.businessId}`} businessId={business.businessId} showToast={showToast} />;
+    githubCard = <GithubConnection key={`gh-${business.businessId}`} businessId={business.businessId} showToast={showToast} />;
   } else if (business.status === "demo") {
     // demo mode (no backend): sample previews, mirroring Opportunities' demo posture.
     gscCard = <DemoGscCard />;
