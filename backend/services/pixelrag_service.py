@@ -144,17 +144,16 @@ def render_and_tile_page(
                         filename = get_tile_filename(tile_idx)
                         file_path = os.path.join(output_dir_str, filename)
 
-                        # Trigger lazy-load scroll
-                        try:
-                            page.mouse.wheel(0, current_slice_height)
-                        except Exception:
-                            pass
-
-                        # Capture vertical slice
+                        # Capture the band currently in view. The clip is
+                        # viewport-relative, so y=0 is the top of what is on screen
+                        # right now (we scroll between tiles, below, rather than
+                        # clipping at an absolute page offset — a clip past the
+                        # viewport raises "Clipped area is outside the resulting
+                        # image" and yields blank tiles).
                         screenshot_bytes = page.screenshot(
                             clip={
                                 "x": 0,
-                                "y": offset,
+                                "y": 0,
                                 "width": viewport_width,
                                 "height": current_slice_height,
                             }
@@ -173,6 +172,14 @@ def render_and_tile_page(
                             "width": viewport_width,
                             "height": current_slice_height,
                         })
+
+                        # Scroll the next band into view and let it paint / lazy-load
+                        # before the next iteration captures it.
+                        try:
+                            page.mouse.wheel(0, current_slice_height)
+                        except Exception:
+                            pass
+                        page.wait_for_timeout(250)
 
                         offset += current_slice_height
                         tile_idx += 1
