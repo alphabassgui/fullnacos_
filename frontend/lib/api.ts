@@ -641,3 +641,16 @@ export function searchConsoleSelectProperty(businessId: string, siteUrl: string)
 export function searchConsoleAnalytics(businessId: string): Promise<ApiResult> {
   return apiFetch(`/api/connections/search-console/analytics?business_id=${encodeURIComponent(businessId)}`);
 }
+
+/**
+ * DELETE /api/connections/search-console/connection?business_id=<id> → 200
+ * {success:true} on removal; 404 {success:false, error:"Google Search Console not
+ * connected"} when nothing was connected; 401 when not authenticated; 400/403/500
+ * otherwise. Returns the raw ApiResult so the caller can treat 200 and 404
+ * (already gone) alike (both leave GSC unlinked) and surface any other status as error.
+ */
+export function searchConsoleDisconnect(businessId: string): Promise<ApiResult> {
+  return apiFetch(`/api/connections/search-console/connection?business_id=${encodeURIComponent(businessId)}`, {
+    method: "DELETE",
+  });
+}
