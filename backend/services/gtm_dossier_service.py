@@ -127,4 +127,7 @@ def save_dossier_to_file(run_id: str, business_id: str, markdown_content: str) -
     file_path = out_dir / f"{run_id}.md"
     file_path.write_text(markdown_content, encoding="utf-8")
 
-    return str(file_path)
+    # Return a forward-slash path so the stored dossier_path is consistent across
+    # platforms (Windows str() would use backslashes); forward slashes work for
+    # Path()/send_file() on every OS.
+    return file_path.as_posix()
