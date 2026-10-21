@@ -258,7 +258,11 @@ def analyze_gtm_tiles(
     api_key = os.getenv("GROQ_API_KEY")
     client = Groq(api_key=api_key)
 
-    model_name = os.getenv("GROQ_VISION_MODEL", "llama-3.2-11b-vision-preview")
+    # Default is overridable via GROQ_VISION_MODEL. Groq rotates/retires vision
+    # models, so set that env var to a current multimodal model id in each
+    # environment; the previous default (llama-3.2-11b-vision-preview) was
+    # decommissioned by Groq.
+    model_name = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
 
     try:
         response = client.chat.completions.create(
