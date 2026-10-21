@@ -41,6 +41,17 @@ COOKIE_SELECTORS = [
     "button[class*='cookie' i]",
 ]
 
+CHROMIUM_LAUNCH_ARGS = [
+    "--disable-dev-shm-usage",   # use /tmp instead of tiny 64MB /dev/shm — the key OOM fix
+    "--no-sandbox",              # required on Render's non-root container
+    "--disable-gpu",             # no GPU on the server; saves memory
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--disable-renderer-backgrounding",
+    "--disable-features=TranslateUI",
+    "--no-first-run",
+]
+
 
 class PixelRAGError(Exception):
     """Base exception for PixelRAG service errors."""
@@ -105,7 +116,7 @@ def render_and_tile_page(
 
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
+            browser = pw.chromium.launch(headless=True, args=CHROMIUM_LAUNCH_ARGS)
             try:
                 page = browser.new_page(
                     viewport={"width": viewport_width, "height": viewport_height},
@@ -202,6 +213,13 @@ def render_and_tile_page(
                 return manifest
 
             finally:
+                # Belt-and-suspenders cleanup: close the page before the browser
+                # so it isn't held across the run. A close error here must never
+                # mask the real result.
+                try:
+                    page.close()
+                except Exception:
+                    pass
                 browser.close()
 
     except PixelRAGError:
