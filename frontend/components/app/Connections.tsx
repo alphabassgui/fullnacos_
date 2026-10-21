@@ -18,6 +18,7 @@ import {
   searchConsoleProperties,
   searchConsoleSelectProperty,
   searchConsoleAnalytics,
+  searchConsoleDisconnect,
   type FlaskGithubRepository,
   type FlaskSearchConsoleProperty,
   type FlaskSearchConsoleRow,
@@ -50,9 +51,10 @@ import {
  *   200 → connected (the list drives the picker)
  *   404 "... not found / not connected" → not connected
  *   401 → not authenticated, route to /login like the rest of the app.
- * GitHub's connected state offers a confirm-gated "Disconnect GitHub" control
- * (DELETE /connection); GSC has no disconnect endpoint yet. After a GSC property
- * is selected we read GET /analytics once and display it read-only; that panel
+ * Both connected states offer a confirm-gated "Disconnect" control
+ * (DELETE /connection): GitHub via /api/connections/github/connection and GSC
+ * via /api/connections/search-console/connection. After a GSC property is
+ * selected we read GET /analytics once and display it read-only; that panel
  * failing never breaks the card.
  *
  * Visual language matches the other dashboards: flat solid surfaces (no
@@ -1049,6 +1051,8 @@ function SearchConsoleConnection({ businessId, showToast }: { businessId: string
   const [phase, setPhase] = useState<GscPhase>({ kind: "loading" });
   const [connecting, setConnecting] = useState(false);
   const [savingProperty, setSavingProperty] = useState<string | null>(null);
+  const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
   // Seed for the analytics panel when a selection is restored on mount.
   const [analyticsSeed, setAnalyticsSeed] = useState<Extract<GscAnalyticsPhase, { kind: "ready" }> | null>(null);
 
@@ -1170,6 +1174,26 @@ function SearchConsoleConnection({ businessId, showToast }: { businessId: string
     [businessId, savingProperty, router, showToast],
   );
 
+  const disconnect = useCallback(() => {
+    if (disconnecting) return;
+    setDisconnecting(true);
+    searchConsoleDisconnect(businessId).then((result) => {
+      if (result.status === 401) {
+        router.replace(LOGIN_HREF);
+        return;
+      }
+      // 200 removed, or 404 already gone — both leave Search Console unlinked.
+      if (result.ok || result.status === 404) {
+        setConfirmingDisconnect(false);
+        setPhase({ kind: "not_connected" });
+        showToast("success", "Search Console disconnected. You can connect again anytime.");
+      } else {
+        showToast("error", "I couldn't disconnect Search Console. Give it another try.");
+      }
+      setDisconnecting(false);
+    });
+  }, [businessId, disconnecting, router, showToast]);
+
   const chipState: ConnState =
     phase.kind === "connected"
       ? "connected"
@@ -1256,6 +1280,33 @@ function SearchConsoleConnection({ businessId, showToast }: { businessId: string
         {phase.selected && (
           <GscAnalyticsPanel key={phase.selected} businessId={businessId} seed={analyticsSeed} m={m} />
         )}
+
+        <div style={{ borderTop: "1px solid " + C.border, paddingTop: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+          {!confirmingDisconnect ? (
+            <ActionButton variant="secondary" onClick={() => setConfirmingDisconnect(true)} m={m}>
+              Disconnect Search Console
+            </ActionButton>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <p style={{ ...NOTE_STYLE, color: C.bad }}>
+                This unlinks Search Console · you&apos;ll re-authorize to reconnect.
+              </p>
+              <div style={{ display: "flex", flexDirection: m ? "column" : "row", gap: 10 }}>
+                <ActionButton
+                  variant="secondary"
+                  onClick={() => setConfirmingDisconnect(false)}
+                  disabled={disconnecting}
+                  m={m}
+                >
+                  Cancel
+                </ActionButton>
+                <ActionButton variant="secondary" danger onClick={disconnect} disabled={disconnecting} m={m}>
+                  {disconnecting ? "Disconnecting…" : "Disconnect"}
+                </ActionButton>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     );
   }
