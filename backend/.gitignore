@@ -49,3 +49,7 @@ hello.txt
 
 # Firebase service-account keys — never commit
 ai-agent-*-firebase-adminsdk-*.json
+
+# --- GTM generated artifacts (PixelRAG tiles & dossiers) ---
+static/tiles/
+static/dossiers/
