@@ -221,3 +221,107 @@ def test_run_gtm_analysis_task_execution(mock_gtm_business_doc, tmp_path):
     mock_run_ref.update.assert_called()
 
 
+def _persisted_competitors(mock_run_ref):
+    """Pull `competitors_analyzed` out of the completing run_ref.update call."""
+    for call in mock_run_ref.update.call_args_list:
+        payload = call.args[0] if call.args else call.kwargs
+        if isinstance(payload, dict) and "competitors_analyzed" in payload:
+            return payload["competitors_analyzed"]
+    raise AssertionError("run_ref.update was never called with competitors_analyzed")
+
+
+def _run_gtm_with(discover_return, analysis, tmp_path, business_doc):
+    """Execute run_gtm_analysis with the standard GTM mocks and return the run_ref."""
+    from task import run_gtm_analysis
+
+    mock_run_ref = MagicMock()
+    mock_manifest = {
+        "url": "https://mysite.com",
+        "tiles": [{"filename": "tile_0001_hero.webp", "path": str(tmp_path / "tile.webp")}],
+    }
+    mock_comp_manifest = {
+        "url": "https://rival.com",
+        "tiles": [{"filename": "tile_0001_hero.webp", "path": str(tmp_path / "tile.webp")}],
+    }
+
+    with patch("firebase.db.collection") as mock_db, \
+         patch("services.pixelrag_service.render_and_tile_page", side_effect=[mock_manifest, mock_comp_manifest]), \
+         patch("services.gtm_discovery_service.discover_competitors", return_value=discover_return), \
+         patch("services.gtm_discovery_service.get_gtm_seed_queries", return_value=["seo tool"]), \
+         patch("agent.gtm_engine.analyze_gtm_tiles", return_value=analysis), \
+         patch("services.gtm_dossier_service.generate_gtm_dossier_markdown", return_value="# Dossier"), \
+         patch("services.gtm_dossier_service.save_dossier_to_file", return_value="static/dossiers/run-1.md"), \
+         patch("services.opportunity_service.create_opportunity", return_value={"id": "opp-1"}):
+
+        mock_db.return_value.document.return_value.get.return_value = business_doc
+        mock_db.return_value.document.return_value.collection.return_value.document.return_value = mock_run_ref
+
+        res = run_gtm_analysis(business_id="biz-1", user_id="user-1", run_id="run-1")
+
+    return res, mock_run_ref
+
+
+def test_run_gtm_analysis_merges_competitor_insights_by_domain(mock_gtm_business_doc, tmp_path):
+    # Competitor domain is given in a scheme/www. variant to exercise normalization.
+    discover_return = [{"url": "https://www.Rival.com/home", "domain": "https://www.Rival.com/home"}]
+    analysis = {
+        "gtm_scores": {"overall": 80},
+        "blind_spots": ["Missing pricing"],
+        "opportunities": [],
+        "competitor_insights": [
+            {
+                "domain": "rival.com",
+                "strengths": ["Clear tiered pricing", "Hero video"],
+                "weaknesses": ["No self-serve signup"],
+            }
+        ],
+    }
+
+    res, mock_run_ref = _run_gtm_with(discover_return, analysis, tmp_path, mock_gtm_business_doc)
+
+    assert res["success"] is True
+    competitors = _persisted_competitors(mock_run_ref)
+    assert len(competitors) == 1
+    assert competitors[0]["strengths"] == ["Clear tiered pricing", "Hero video"]
+    assert competitors[0]["weaknesses"] == ["No self-serve signup"]
+
+
+def test_run_gtm_analysis_no_matching_insights_yields_empty_lists(mock_gtm_business_doc, tmp_path):
+    # Non-matching domain AND unequal lengths -> no match, no index fallback, no error.
+    discover_return = [{"url": "https://rival.com", "domain": "rival.com"}]
+    analysis = {
+        "gtm_scores": {"overall": 80},
+        "blind_spots": [],
+        "opportunities": [],
+        "competitor_insights": [
+            {"domain": "someone-else.com", "strengths": ["x"], "weaknesses": ["y"]},
+            {"domain": "another.com", "strengths": ["z"], "weaknesses": []},
+        ],
+    }
+
+    res, mock_run_ref = _run_gtm_with(discover_return, analysis, tmp_path, mock_gtm_business_doc)
+
+    assert res["success"] is True
+    competitors = _persisted_competitors(mock_run_ref)
+    assert len(competitors) == 1
+    assert competitors[0]["strengths"] == []
+    assert competitors[0]["weaknesses"] == []
+
+
+def test_run_gtm_analysis_missing_competitor_insights_key_is_safe(mock_gtm_business_doc, tmp_path):
+    # Engine result omits competitor_insights entirely — run must still complete.
+    discover_return = [{"url": "https://rival.com", "domain": "rival.com"}]
+    analysis = {
+        "gtm_scores": {"overall": 80},
+        "blind_spots": [],
+        "opportunities": [],
+    }
+
+    res, mock_run_ref = _run_gtm_with(discover_return, analysis, tmp_path, mock_gtm_business_doc)
+
+    assert res["success"] is True
+    competitors = _persisted_competitors(mock_run_ref)
+    assert competitors[0]["strengths"] == []
+    assert competitors[0]["weaknesses"] == []
+
+

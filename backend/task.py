@@ -9,6 +9,26 @@ from services.execution_engine import execute_action
 
 logger = logging.getLogger(__name__)
 
+
+def _normalize_domain(value):
+    """Reduce a domain or URL to a comparable key.
+
+    Lowercases, drops any scheme and path/query, and strips a leading "www."
+    so that e.g. "https://www.Foo.com/x" and "foo.com" both yield "foo.com".
+    """
+    if not value:
+        return ""
+    s = str(value).strip().lower()
+    if "://" in s:
+        s = s.split("://", 1)[1]
+    # Drop path, query, and fragment — keep only the host portion.
+    for sep in ("/", "?", "#"):
+        s = s.split(sep, 1)[0]
+    if s.startswith("www."):
+        s = s[4:]
+    return s
+
+
 redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 celery = Celery(
@@ -297,6 +317,54 @@ def run_gtm_analysis(self, business_id, user_id, run_id):
         gtm_scores = analysis_result.get("gtm_scores", {})
         blind_spots = analysis_result.get("blind_spots", [])
         opportunities_data = analysis_result.get("opportunities", [])
+        competitor_insights = analysis_result.get("competitor_insights") or []
+
+        # Merge per-competitor strengths/weaknesses from the vision engine into
+        # the `competitors` list IN PLACE, keyed by normalized domain. This list
+        # is the single source for both the dossier (run_summary) and the
+        # persisted run doc, so mutating it once wires the data through both.
+        # Defensive: this runs inside a Celery task, so any unexpected shape in
+        # competitor_insights must leave empty lists rather than raise.
+        try:
+            # Ensure a consistent shape even with no insights / no matches.
+            for comp in competitors:
+                comp["strengths"] = []
+                comp["weaknesses"] = []
+
+            if isinstance(competitor_insights, list) and competitor_insights:
+                insight_by_domain = {}
+                for insight in competitor_insights:
+                    if not isinstance(insight, dict):
+                        continue
+                    key = _normalize_domain(insight.get("domain"))
+                    if key:
+                        insight_by_domain.setdefault(key, insight)
+
+                matched_any = False
+                for comp in competitors:
+                    key = _normalize_domain(comp.get("domain") or comp.get("url"))
+                    insight = insight_by_domain.get(key)
+                    if insight is not None:
+                        matched_any = True
+                        comp["strengths"] = insight.get("strengths") or []
+                        comp["weaknesses"] = insight.get("weaknesses") or []
+
+                # Fall back to index-order alignment ONLY when no domains lined
+                # up at all and the two lists are the same length.
+                if not matched_any and len(competitors) == len(competitor_insights):
+                    for comp, insight in zip(competitors, competitor_insights):
+                        if isinstance(insight, dict):
+                            comp["strengths"] = insight.get("strengths") or []
+                            comp["weaknesses"] = insight.get("weaknesses") or []
+        except Exception as exc:
+            logger.warning(
+                "Failed to merge GTM competitor insights for business %s: %s",
+                business_id,
+                exc,
+            )
+            for comp in competitors:
+                comp.setdefault("strengths", [])
+                comp.setdefault("weaknesses", [])
 
         # 5. Persist Opportunities
         created_opp_ids = []
