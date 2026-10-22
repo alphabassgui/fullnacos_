@@ -90,8 +90,9 @@ def render_and_tile_page(
     tile_height: int = 800,
     viewport_width: int = 1280,
     viewport_height: int = 800,
-    device_scale_factor: float = 1.5,
+    device_scale_factor: float = 1.0,
     timeout_ms: int = 15000,
+    screenshot_timeout_ms: int = 20000,
 ) -> Dict[str, Any]:
     """Render a web page using Playwright and slice into vertical tiles.
 
@@ -102,8 +103,12 @@ def render_and_tile_page(
         tile_height: Height of each vertical tile slice in pixels (default: 800).
         viewport_width: Viewport width in pixels (default: 1280).
         viewport_height: Viewport height in pixels (default: 800).
-        device_scale_factor: Device pixel ratio for crisp typography (default: 1.5).
+        device_scale_factor: Device pixel ratio (default: 1.0). Kept at 1.0 to
+            halve per-screenshot bitmap size, which keeps capture within memory
+            and time budget on small headless containers (e.g. Render free tier).
         timeout_ms: Navigation timeout in milliseconds (default: 15000).
+        screenshot_timeout_ms: Per-tile screenshot timeout in milliseconds
+            (default: 20000).
 
     Returns:
         dict: Manifest containing URL, page dimensions, tile metadata, and file paths.
@@ -161,13 +166,21 @@ def render_and_tile_page(
                         # clipping at an absolute page offset — a clip past the
                         # viewport raises "Clipped area is outside the resulting
                         # image" and yields blank tiles).
+                        # animations="disabled" freezes CSS animations/transitions
+                        # (and cancels infinite ones to their first frame) so a
+                        # heavily animated page yields a stable frame immediately
+                        # instead of the capture stalling until the explicit
+                        # timeout — the "Page.screenshot: Timeout exceeded" failure
+                        # mode on memory-constrained containers.
                         screenshot_bytes = page.screenshot(
                             clip={
                                 "x": 0,
                                 "y": 0,
                                 "width": viewport_width,
                                 "height": current_slice_height,
-                            }
+                            },
+                            animations="disabled",
+                            timeout=screenshot_timeout_ms,
                         )
 
                         if isinstance(screenshot_bytes, bytes):
