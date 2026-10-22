@@ -667,14 +667,20 @@ export function searchConsoleDisconnect(businessId: string): Promise<ApiResult> 
  * ------------------------------------------------------------------------- */
 
 /**
- * One screenshot tile in a site's manifest. `path` is a RELATIVE string like
- * "static/tiles/<biz>/<run>/user_site/tile_0001_hero.webp"; the UI builds an image
- * src as `/api/backend/${path}` (the Next rewrite proxies it to the backend).
+ * One screenshot tile in a site's manifest.
+ *  - `url`: the durable Supabase public URL for the tile, when storage is
+ *    configured. Absent/null on older runs or when storage is off.
+ *  - `path`: a RELATIVE string like
+ *    "static/tiles/<biz>/<run>/user_site/tile_0001_hero.webp", served off the
+ *    backend's ephemeral local disk.
+ * The UI prefers `url` when present, else builds an image src from `path` as
+ * `/api/backend/${path}` (the Next rewrite proxies it to the backend).
  */
 export type GtmTile = {
   index: number;
   filename: string;
   path: string;
+  url?: string;
   scroll_top: number;
   scroll_bottom: number;
   width: number;

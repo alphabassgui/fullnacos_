@@ -183,14 +183,33 @@ def render_and_tile_page(
                             timeout=screenshot_timeout_ms,
                         )
 
+                        tile_url: Optional[str] = None
                         if isinstance(screenshot_bytes, bytes):
                             with open(file_path, "wb") as f:
                                 f.write(screenshot_bytes)
+
+                            # Also persist the tile to durable object storage so it
+                            # survives the ephemeral local disk being wiped on
+                            # redeploy/idle. The object key mirrors the on-disk
+                            # layout minus a leading "static/" (forward slashes
+                            # regardless of OS), e.g.
+                            # "tiles/<biz>/<run>/user_site/tile_0001_hero.webp".
+                            # Lazy-imported (mirrors task.py) to avoid import-time
+                            # coupling. A None return or any hiccup is non-fatal:
+                            # the tile just carries "url": None and the local path
+                            # remains the same-instance fallback.
+                            from services.tile_storage_service import upload_tile_bytes
+
+                            object_key = file_path.replace(os.sep, "/").lstrip("/")
+                            if object_key.startswith("static/"):
+                                object_key = object_key[len("static/"):]
+                            tile_url = upload_tile_bytes(screenshot_bytes, object_key)
 
                         tiles.append({
                             "index": tile_idx,
                             "filename": filename,
                             "path": file_path,
+                            "url": tile_url,
                             "scroll_top": offset,
                             "scroll_bottom": offset + current_slice_height,
                             "width": viewport_width,

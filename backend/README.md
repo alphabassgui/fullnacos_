@@ -524,6 +524,9 @@ gunicorn -w 4 -b 0.0.0.0:8000 "app:app"
 | `INSTAGRAM_OAUTH_TOKEN_URL` | — | Instagram token endpoint |
 | `INSTAGRAM_API_BASE_URL` | — | Instagram Graph API base URL |
 | `INSTAGRAM_OAUTH_SCOPES` | — | Required scopes (e.g. `instagram_business_basic instagram_business_content_publish`) |
+| `SUPABASE_URL` | — | Supabase project URL for durable GTM tile storage; when unset, tiles stay on the ephemeral local disk only |
+| `SUPABASE_SERVICE_KEY` | — | Supabase `service_role` key (SECRET — never log or commit) used to upload tiles |
+| `SUPABASE_TILES_BUCKET` | — | Supabase Storage bucket name for tiles; the bucket must be **public-read** so the screenshots serve directly |
 
 > ⚠️ **Never commit `.env` or the Firebase service account JSON to version control.**
 

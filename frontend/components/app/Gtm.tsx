@@ -190,16 +190,18 @@ function ScoreGauge({ label, value, reduced }: { label: string; value: number; r
   );
 }
 
-/** A single screenshot tile. `path` is relative; the src routes through the Next
- *  rewrite proxy. Tiles live on ephemeral disk and may be gone — onError hides the
- *  broken image rather than showing a torn placeholder. */
+/** A single screenshot tile. Prefer the durable Supabase `url` when present;
+ *  otherwise fall back to the relative `path` served off the backend's ephemeral
+ *  disk through the Next rewrite proxy. Tiles on ephemeral disk may be gone —
+ *  onError hides the broken image rather than showing a torn placeholder. */
 function TileImage({ tile, alt }: { tile: GtmTile; alt: string }) {
   const [broken, setBroken] = useState(false);
   if (broken) return null;
+  const src = typeof tile.url === "string" && tile.url ? tile.url : `/api/backend/${tile.path}`;
   return (
     // eslint-disable-next-line @next/next/no-img-element
     <img
-      src={`/api/backend/${tile.path}`}
+      src={src}
       alt={alt}
       loading="lazy"
       onError={() => setBroken(true)}
