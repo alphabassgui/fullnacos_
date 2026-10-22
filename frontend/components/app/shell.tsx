@@ -47,6 +47,7 @@ export const BODY = "var(--font-body)";
 
 const NAV_ITEMS: [icon: string, label: string, href: string][] = [
   ["telemetry", "Opportunities", "/opportunities"],
+  ["audit", "GTM", "/gtm"],
   ["work-flow", "Campaigns", "/campaigns"],
   ["vital-sign", "Results", "/results"],
   ["link", "Connections", "/connections"],

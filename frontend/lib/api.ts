@@ -654,3 +654,115 @@ export function searchConsoleDisconnect(businessId: string): Promise<ApiResult> 
     method: "DELETE",
   });
 }
+
+/* ── GTM / PixelRAG ──────────────────────────────────────────────────────────
+ * The go-to-market audit (PixelRAG): the backend screenshots the business's site
+ * and its competitors, scores the go-to-market surface, names the blind spots, and
+ * drafts a GTM dossier. It is ASYNC (~90s): trigger → poll, like the analyze
+ * pipeline. All JSON calls go through apiFetch (credentials:'include'); the dossier
+ * is the one exception — it returns text/markdown, so it has its own small fetch.
+ *
+ * Honesty boundary: the dossier is a DRAFT recommendation the owner reads and acts
+ * on. Nothing here is sent, published or executed on its own.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * One screenshot tile in a site's manifest. `path` is a RELATIVE string like
+ * "static/tiles/<biz>/<run>/user_site/tile_0001_hero.webp"; the UI builds an image
+ * src as `/api/backend/${path}` (the Next rewrite proxies it to the backend).
+ */
+export type GtmTile = {
+  index: number;
+  filename: string;
+  path: string;
+  scroll_top: number;
+  scroll_bottom: number;
+  width: number;
+  height: number;
+};
+
+/**
+ * A GTM run as GET /runs/<id> returns it (under `{run}`). Only `id` and `status`
+ * are dependable; the rest arrive as the run progresses. Verified against the
+ * backend task.py: competitors_analyzed[] carries ONLY domain, url and
+ * manifest.tiles — no strengths/weaknesses this phase. A completed run can still
+ * come back with empty tiles / flat scores (a browser/OOM or vision soft-fail), so
+ * the UI degrades gracefully rather than assuming these fields are populated.
+ */
+export type FlaskGtmRun = {
+  id: string;
+  business_id: string;
+  status: "queued" | "running" | "completed" | "failed";
+  created_at: string;
+  completed_at?: string;
+  website_url?: string | null;
+  gtm_scores?: {
+    overall: number;
+    above_the_fold: number;
+    pricing_clarity: number;
+    social_proof: number;
+    cro_friction: number;
+  };
+  blind_spots?: string[];
+  competitors_analyzed?: Array<{ domain: string; url: string; manifest?: { tiles?: GtmTile[] } }>;
+  user_manifest?: { url?: string; page_height?: number; tiles?: GtmTile[] };
+  opportunities_created_count?: number;
+  dossier_path?: string;
+  error?: string;
+};
+
+/**
+ * POST /api/gtm/run with {business_id} → 202 {success, message, run_id}. 400 when
+ * the business has no website; 401/403/404 otherwise. Returns the raw ApiResult so
+ * the caller can read run_id off the 202 and branch on error status.
+ */
+export function gtmRun(businessId: string): Promise<ApiResult> {
+  return apiFetch(`/api/gtm/run`, { method: "POST", body: JSON.stringify({ business_id: businessId }) });
+}
+
+/** GET /api/gtm/runs?business_id=<id> → 200 {success, runs:[...]} — the business's GTM runs. */
+export function gtmListRuns(businessId: string): Promise<ApiResult> {
+  return apiFetch(`/api/gtm/runs?business_id=${encodeURIComponent(businessId)}`);
+}
+
+/**
+ * GET /api/gtm/runs/<runId>?business_id=<id> → 200 {success, run:{...}}. Polled
+ * until terminal. The business_id query param is REQUIRED — run_id alone 400s.
+ */
+export function gtmGetRun(runId: string, businessId: string): Promise<ApiResult> {
+  return apiFetch(`/api/gtm/runs/${encodeURIComponent(runId)}?business_id=${encodeURIComponent(businessId)}`);
+}
+
+/** The result of the dossier fetch — a plain text/markdown body, never JSON. */
+export type DossierResult = { ok: boolean; status: number; text: string };
+
+/**
+ * GET /api/gtm/runs/<runId>/dossier?business_id=<id> → 200 text/markdown (NOT JSON).
+ * This intentionally bypasses apiFetch's JSON parse: it routes through the same
+ * "/api/backend" rewrite proxy (so the session cookie stays first-party), sends
+ * credentials, bounds the request with an AbortController, and reads the body as
+ * text. Transport failures / timeouts resolve to { ok:false } so the caller can
+ * degrade gracefully rather than throw.
+ */
+export async function gtmGetDossier(runId: string, businessId: string, timeoutMs = 60000): Promise<DossierResult> {
+  if (!getApiBase()) throw new Error("NEXT_PUBLIC_API_BASE is not configured");
+
+  const path = `/api/gtm/runs/${encodeURIComponent(runId)}/dossier?business_id=${encodeURIComponent(businessId)}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch("/api/backend" + path, { credentials: "include", signal: controller.signal });
+    let text = "";
+    try {
+      text = await res.text();
+    } catch {
+      // Body read failed (network hiccup / abort mid-stream); leave text empty.
+    }
+    return { ok: res.ok, status: res.status, text };
+  } catch {
+    // Transport error or timeout — the caller surfaces a graceful empty state.
+    return { ok: false, status: 0, text: "" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
