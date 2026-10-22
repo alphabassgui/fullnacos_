@@ -233,6 +233,76 @@ function TileStack({ tiles, labelPrefix }: { tiles: GtmTile[] | undefined; label
   );
 }
 
+/** One labeled column of competitor insights (strengths OR weaknesses). Each item
+ *  carries a small colored marker — success for strengths, error for weaknesses —
+ *  so the two read apart at a glance without inventing new colors. */
+function InsightColumn({ label, items, color }: { label: string; items: string[]; color: string }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <span
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 7,
+          fontFamily: DISPLAY,
+          fontWeight: 600,
+          fontSize: 13,
+          lineHeight: "18px",
+          color: C.text,
+        }}
+      >
+        <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: 100, background: color, flexShrink: 0 }} />
+        {label}
+      </span>
+      <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 6 }}>
+        {items.map((it, idx) => (
+          <li
+            key={idx}
+            style={{
+              display: "flex",
+              gap: 8,
+              fontFamily: BODY,
+              fontSize: 13,
+              lineHeight: "19px",
+              color: C.secondary,
+              textWrap: "pretty",
+            }}
+          >
+            <span aria-hidden="true" style={{ color: C.muted, flexShrink: 0 }}>·</span>
+            <span>{it}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** Competitor strengths / weaknesses, surfaced on each competitor card. Both lists
+ *  are optional (older runs and empty analyses omit them), so this renders nothing
+ *  when there's nothing to show — the screenshot capture still stands on its own.
+ *  Side-by-side on desktop, stacked on mobile. */
+function CompetitorInsights({
+  strengths,
+  weaknesses,
+  m,
+}: {
+  strengths: string[] | undefined;
+  weaknesses: string[] | undefined;
+  m: boolean;
+}) {
+  const clean = (list: string[] | undefined) =>
+    Array.isArray(list) ? list.filter((s) => typeof s === "string" && s.trim()) : [];
+  const s = clean(strengths);
+  const w = clean(weaknesses);
+  if (s.length === 0 && w.length === 0) return null;
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: m ? "1fr" : "1fr 1fr", gap: m ? 16 : 24 }}>
+      {s.length > 0 && <InsightColumn label="What they do well" items={s} color={C.good} />}
+      {w.length > 0 && <InsightColumn label="Where they're weak" items={w} color={C.bad} />}
+    </div>
+  );
+}
+
 /* ── Tiny inline markdown renderer (no library installed) ──────────────────── */
 
 /** Render inline markdown: **bold**, [text](url), `code`. Builds React nodes (no
@@ -757,6 +827,7 @@ function GtmResult({ run, dossier, m, reduced }: { run: FlaskGtmRun; dossier: Do
                   </a>
                 )}
               </div>
+              <CompetitorInsights strengths={comp.strengths} weaknesses={comp.weaknesses} m={m} />
               <TileStack tiles={comp.manifest?.tiles} labelPrefix={comp.domain || "Competitor"} />
             </Card>
           ))}

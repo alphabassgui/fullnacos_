@@ -684,10 +684,12 @@ export type GtmTile = {
 /**
  * A GTM run as GET /runs/<id> returns it (under `{run}`). Only `id` and `status`
  * are dependable; the rest arrive as the run progresses. Verified against the
- * backend task.py: competitors_analyzed[] carries ONLY domain, url and
- * manifest.tiles — no strengths/weaknesses this phase. A completed run can still
- * come back with empty tiles / flat scores (a browser/OOM or vision soft-fail), so
- * the UI degrades gracefully rather than assuming these fields are populated.
+ * backend task.py: competitors_analyzed[] carries domain, url, manifest.tiles and
+ * (for runs created after the competitor-insights deploy) strengths/weaknesses —
+ * both default to [] and older runs omit them, so the UI treats them as optional.
+ * A completed run can still come back with empty tiles / flat scores (a browser/OOM
+ * or vision soft-fail), so the UI degrades gracefully rather than assuming these
+ * fields are populated.
  */
 export type FlaskGtmRun = {
   id: string;
@@ -704,7 +706,13 @@ export type FlaskGtmRun = {
     cro_friction: number;
   };
   blind_spots?: string[];
-  competitors_analyzed?: Array<{ domain: string; url: string; manifest?: { tiles?: GtmTile[] } }>;
+  competitors_analyzed?: Array<{
+    domain: string;
+    url: string;
+    manifest?: { tiles?: GtmTile[] };
+    strengths?: string[];
+    weaknesses?: string[];
+  }>;
   user_manifest?: { url?: string; page_height?: number; tiles?: GtmTile[] };
   opportunities_created_count?: number;
   dossier_path?: string;
