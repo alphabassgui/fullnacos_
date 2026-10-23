@@ -1,11 +1,28 @@
+import inspect
+
 import pytest
 
 from connectors import get_connector
+from connectors.dry_run import DryRunConnector
+from connectors.github import GitHubConnector
 from connectors.instagram import InstagramConnector
+from connectors.website import WebsiteConnector
 
 
 # "website" and "social" are routed; these remain without a connector.
 UNROUTED_TYPES = ["content", "seo", "email", "research", "other"]
+
+
+@pytest.mark.parametrize(
+    "connector_cls",
+    [InstagramConnector, DryRunConnector, WebsiteConnector, GitHubConnector],
+)
+def test_execute_accepts_execution_id_kwarg(connector_cls):
+    # The execution engine calls connector.execute(action, business_id, user_id,
+    # execution_id=execution_id), so every connector must accept that keyword or
+    # a real execution raises TypeError.
+    params = inspect.signature(connector_cls.execute).parameters
+    assert "execution_id" in params
 
 
 def test_get_connector_social_returns_instagram_connector():

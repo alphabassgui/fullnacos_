@@ -9,5 +9,6 @@ class BaseConnector(ABC):
         action,
         business_id,
         user_id,
+        execution_id=None,
     ):
         raise NotImplementedError
