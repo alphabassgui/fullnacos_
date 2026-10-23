@@ -104,8 +104,24 @@ def analyze_business_website(self, business_id, user_id, run_id):
             "started_at": datetime.utcnow().isoformat(),
         })
 
-        # Fetch website
-        html, final_url = fetch_website_html(website_url)
+        # Fetch website. A blocked (403/429), unreachable, or otherwise
+        # non-200 site must end the run in a clean failed state the frontend
+        # can display — never crash the Celery task with an unhandled
+        # exception. (website_analyzer already tries realistic headers + a
+        # Playwright fallback before surfacing a failure here.)
+        try:
+            html, final_url = fetch_website_html(website_url)
+        except Exception as exc:
+            run_ref.update({
+                "analysis_status": "failed",
+                "status": "failed",
+                "error": str(exc),
+                "completed_at": datetime.utcnow().isoformat(),
+            })
+            return {
+                "success": False,
+                "error": str(exc),
+            }
 
         # Analyze HTML
         analysis = analyze_html(html)

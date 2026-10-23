@@ -221,6 +221,36 @@ def test_observation_groq_failure_marks_run_failed(task_env, monkeypatch):
     assert not biz_ref.collection("opportunities").docs
 
 
+def test_fetch_failure_fails_run_gracefully_without_raising(task_env, monkeypatch):
+    """A blocked/unreachable site (both the plain request and the Playwright
+    fallback failed) must end the run in a clean failed state the frontend can
+    display — NOT crash the Celery task. This is the core regression this fix
+    exists to prevent.
+    """
+    task_mod, db = task_env
+
+    monkeypatch.setattr(
+        task_mod, "fetch_website_html",
+        lambda url: (_ for _ in ()).throw(ValueError("Website returned HTTP 403.")),
+    )
+
+    # Must NOT raise — returns a graceful failure envelope instead.
+    result = task_mod.analyze_business_website.run("b1", "u1", "r1")
+
+    assert result["success"] is False
+    assert "403" in result["error"]
+
+    biz_ref = db.collection("businesses").document("b1")
+    run_ref = biz_ref.collection("agent_runs").document("r1")
+    assert run_ref.data["analysis_status"] == "failed"
+    assert run_ref.data["status"] == "failed"
+    assert run_ref.data["error"] == "Website returned HTTP 403."
+    assert run_ref.data["completed_at"]
+    # Run short-circuits before any observation/opportunity work.
+    assert not biz_ref.collection("observations").docs
+    assert not biz_ref.collection("opportunities").docs
+
+
 def test_opportunity_groq_failure_marks_run_failed(task_env, monkeypatch):
     task_mod, db = task_env
     import agent.opportunity_generator as generator_mod

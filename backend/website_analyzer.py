@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 import re
 import socket
 import threading
@@ -8,6 +9,9 @@ from urllib.parse import urljoin, urlsplit
 
 import requests
 from bs4 import BeautifulSoup
+
+
+logger = logging.getLogger(__name__)
 
 
 MAX_HTML_SIZE = 2 * 1024 * 1024  # 2 MB (of DECOMPRESSED content)
@@ -259,7 +263,35 @@ def validate_and_pin(url):
 # Fetching
 # ---------------------------------------------------------------------------
 
-_USER_AGENT = "AI-Growth-Agent/1.0 (Website Analysis Bot)"
+# A realistic modern-browser header set. The old bot User-Agent
+# ("AI-Growth-Agent/1.0 (Website Analysis Bot)") was rejected with 403 by most
+# WAFs; sending the headers an ordinary Chrome request sends clears the bulk of
+# those blocks without any browser automation.
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+)
+
+_BROWSER_HEADERS = {
+    "User-Agent": _USER_AGENT,
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,image/apng,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    # Accept-Encoding is left to requests so it only advertises codecs it can
+    # transparently decode.
+}
+
+# HTTP statuses where the plain request looks WAF-blocked / transiently
+# unavailable and a headless-browser fetch is worth attempting as a fallback.
+# (403/429 plus any 5xx.)
+_FALLBACK_STATUSES = frozenset({403, 429})
 
 
 def _read_limited(response):
@@ -279,6 +311,56 @@ def _read_limited(response):
     return b"".join(chunks)
 
 
+def _should_fallback(status_code):
+    """True when a plain-request status looks WAF-blocked / transiently
+    unavailable enough to be worth a headless-browser retry (403/429/5xx)."""
+    return status_code in _FALLBACK_STATUSES or 500 <= status_code <= 599
+
+
+def _fetch_html_via_playwright(url):
+    """Headless-browser fallback for pages the plain request can't get past
+    (e.g. WAF 403/429). Reuses the Playwright capability already in the repo —
+    the OOM-tuned Chromium launch args from the PixelRAG service — rather than
+    adding a new scraping dependency.
+
+    Returns the page HTML as bytes, or ``None`` on any failure (Playwright or
+    Chromium unavailable, OOM, navigation error). Soft-failing to ``None`` —
+    the same way PixelRAG degrades — lets the caller fall through to its
+    graceful error instead of crashing the audit run.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+        from services.pixelrag_service import CHROMIUM_LAUNCH_ARGS
+    except Exception as exc:  # pragma: no cover - import guard
+        logger.warning("Playwright fallback unavailable for %s: %s", url, exc)
+        return None
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True, args=CHROMIUM_LAUNCH_ARGS)
+            try:
+                page = browser.new_page()
+                page.goto(
+                    url,
+                    timeout=REQUEST_TIMEOUT * 1000,
+                    wait_until="domcontentloaded",
+                )
+                html = page.content()
+            finally:
+                browser.close()
+    except Exception as exc:
+        logger.warning(
+            "Playwright fallback failed for %s; falling through to graceful "
+            "error: %s",
+            url,
+            exc,
+        )
+        return None
+
+    # Match the bytes contract of the plain-request path.
+    return html.encode("utf-8") if isinstance(html, str) else html
+
+
 def fetch_website_html(url, session=None):
     """Safely fetch website HTML: strict per-hop validation + DNS pinning +
     manual redirect handling. Returns (html_bytes, final_url)."""
@@ -293,14 +375,21 @@ def fetch_website_html(url, session=None):
             raise ValueError("Redirect loop detected.")
         visited.add(current_url)
 
-        with _pin_dns(_hostname_of(current_url), pinned_ip):
-            response = session.get(
-                current_url,
-                timeout=REQUEST_TIMEOUT,
-                allow_redirects=False,  # we validate every hop ourselves
-                headers={"User-Agent": _USER_AGENT},
-                stream=True,
-            )
+        try:
+            with _pin_dns(_hostname_of(current_url), pinned_ip):
+                response = session.get(
+                    current_url,
+                    timeout=REQUEST_TIMEOUT,
+                    allow_redirects=False,  # we validate every hop ourselves
+                    headers=_BROWSER_HEADERS,
+                    stream=True,
+                )
+        except requests.exceptions.RequestException as exc:
+            # Timeouts / connection errors become a friendly, run-failing error
+            # (the caller turns this into a graceful failed run, not a crash).
+            raise ValueError(
+                f"Could not reach the website ({exc.__class__.__name__})."
+            ) from exc
 
         if response.status_code in {301, 302, 303, 307, 308}:
             location = response.headers.get("Location")
@@ -312,8 +401,17 @@ def fetch_website_html(url, session=None):
             continue
 
         if response.status_code != 200:
+            status_code = response.status_code
             response.close()
-            raise ValueError(f"Website returned HTTP {response.status_code}.")
+            # WAF-blocked / transiently unavailable: retry with the headless
+            # browser before giving up. current_url has already passed
+            # validate_and_pin this iteration, so the fallback only ever runs
+            # against an already-validated URL.
+            if _should_fallback(status_code):
+                html = _fetch_html_via_playwright(current_url)
+                if html is not None:
+                    return html, current_url
+            raise ValueError(f"Website returned HTTP {status_code}.")
 
         content_type = response.headers.get("Content-Type", "").lower()
         if "text/html" not in content_type:
