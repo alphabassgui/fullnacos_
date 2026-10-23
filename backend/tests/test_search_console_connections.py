@@ -119,15 +119,18 @@ def test_callback_redirects_to_connected_on_success(client, monkeypatch):
     )
     monkeypatch.setattr(sc_routes, "db", fake_db)
 
+    # The callback now verifies a *signed* state (itsdangerous), not a session
+    # value, so build a real signed state carrying the user/business identity.
+    signed_state = sc_routes._oauth_serializer().dumps(
+        {"user_id": "u1", "business_id": "b1"}
+    )
+
     with client.session_transaction() as sess:
         sess["user_id"] = "u1"
-        sess["search_console_oauth_state"] = "valid-state"
-        sess["search_console_oauth_business_id"] = "b1"
-        sess["search_console_oauth_code_verifier"] = "verifier"
 
     resp = client.get(
         "/api/connections/search-console/callback"
-        "?code=the-code&state=valid-state"
+        f"?code=the-code&state={signed_state}"
     )
 
     assert resp.status_code == 302
