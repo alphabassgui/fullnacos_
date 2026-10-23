@@ -125,12 +125,14 @@ class AuthDb:
 
 @pytest.fixture
 def fake_firebase(monkeypatch):
+    import decorators
     import routes.auth as routes_auth
     import routes.auth_api as auth_api
 
     db = AuthDb()
     monkeypatch.setattr(routes_auth, "db", db)
     monkeypatch.setattr(auth_api, "db", db)
+    monkeypatch.setattr(decorators, "db", db)
 
     def raise_not_found(email):
         raise UserNotFoundError(email)
@@ -271,7 +273,40 @@ def test_login_success_sets_session(fake_firebase, client):
         assert sess["role"] == "user"
         token = sess["session_token"]
     assert len(token) == 128
-    assert db.collection("users").document("u1").data["active_session_token"] == token
+    # Token is ADDED to the per-user valid-token set.
+    assert token in db.collection("users").document("u1").data["active_session_tokens"]
+
+
+def test_second_login_does_not_invalidate_first(fake_firebase, client):
+    # Core regression: logging in a second time must NOT drop the first token —
+    # both devices' tokens stay valid in the set.
+    db, routes_auth, auth_api = fake_firebase
+    seed_users(db, {
+        "u1": {
+            "username": "Alice", "email": "alice@example.com", "role": "user", "status": "Active",
+            "password_hash": generate_password_hash("password123"),
+        },
+    })
+
+    resp1 = post_json(client, "/api/auth/login", {
+        "email": "alice@example.com", "password": "password123",
+    }, "5.6.7.8")
+    assert resp1.status_code == 200
+    tokens_after_first = list(db.collection("users").document("u1").data["active_session_tokens"])
+    assert len(tokens_after_first) == 1
+    token1 = tokens_after_first[0]
+
+    resp2 = post_json(client, "/api/auth/login", {
+        "email": "alice@example.com", "password": "password123",
+    }, "9.8.7.6")
+    assert resp2.status_code == 200
+    tokens_after_second = db.collection("users").document("u1").data["active_session_tokens"]
+
+    # Both the first and the newly-minted token are present.
+    assert token1 in tokens_after_second
+    assert len(tokens_after_second) == 2
+    token2 = next(t for t in tokens_after_second if t != token1)
+    assert token2 != token1
 
 
 def test_login_wrong_password_increments_attempts(fake_firebase, client):
@@ -340,21 +375,23 @@ def test_api_auth_blueprint_registered(flask_app):
         assert rule in rules
 
 
-def test_logout_clears_session_and_wipes_token(fake_firebase, client):
+def test_logout_removes_only_current_token(fake_firebase, client):
+    # Logging out device A removes only A's token; device B's token stays valid.
     db, routes_auth, auth_api = fake_firebase
     seed_users(db, {"u1": {
         "username": "Alice", "email": "alice@example.com", "role": "user", "status": "Active",
         "password_hash": generate_password_hash("password123"),
-        "active_session_token": "old-token",
+        "active_session_tokens": ["tok-A", "tok-B"],
     }})
     with client.session_transaction() as sess:
         sess["user_id"] = "u1"
+        sess["session_token"] = "tok-A"
 
     resp = client.post("/api/auth/logout")
     assert resp.status_code == 200
     assert resp.get_json() == {"success": True, "message": "Logged out."}
 
-    assert db.collection("users").document("u1").data["active_session_token"] is None
+    assert db.collection("users").document("u1").data["active_session_tokens"] == ["tok-B"]
     with client.session_transaction() as sess:
         assert "user_id" not in sess
 
@@ -499,3 +536,73 @@ def test_me_unknown_user_clears_session(fake_firebase, client):
     assert resp.get_json() == {"success": False, "error": "Authentication required"}
     with client.session_transaction() as sess:
         assert "user_id" not in sess
+
+
+# ──────────────────────────────────────────────
+# login_required decorator — multi-device session set
+# ──────────────────────────────────────────────
+
+def _run_guarded(flask_app, user_id, session_token):
+    """Apply login_required to a trivial view and invoke it inside a request
+    context with the given session. Returns the view's return value ("ok" when
+    the guard passes) or the redirect Response (when it rejects)."""
+    import decorators
+    from flask import session as flask_session
+
+    @decorators.login_required
+    def view():
+        return "ok"
+
+    with flask_app.test_request_context("/"):
+        if user_id is not None:
+            flask_session["user_id"] = user_id
+        if session_token is not None:
+            flask_session["session_token"] = session_token
+        return view()
+
+
+def test_login_required_passes_for_token_in_set(fake_firebase, flask_app):
+    db, routes_auth, auth_api = fake_firebase
+    seed_users(db, {"u1": {
+        "email": "alice@example.com", "status": "Active",
+        "active_session_tokens": ["tok-A", "tok-B"],
+    }})
+
+    # Both members of the set validate (two concurrent devices).
+    assert _run_guarded(flask_app, "u1", "tok-A") == "ok"
+    assert _run_guarded(flask_app, "u1", "tok-B") == "ok"
+
+
+def test_login_required_rejects_token_not_in_set(fake_firebase, flask_app):
+    db, routes_auth, auth_api = fake_firebase
+    seed_users(db, {"u1": {
+        "email": "alice@example.com", "status": "Active",
+        "active_session_tokens": ["tok-A"],
+    }})
+
+    resp = _run_guarded(flask_app, "u1", "tok-UNKNOWN")
+    # Unauthorized stays unauthorized → redirect to login.
+    assert getattr(resp, "status_code", None) == 302
+
+
+def test_login_required_backward_compat_legacy_token(fake_firebase, flask_app):
+    # Legacy doc: single `active_session_token`, no set → still authenticates.
+    db, routes_auth, auth_api = fake_firebase
+    seed_users(db, {"u1": {
+        "email": "alice@example.com", "status": "Active",
+        "active_session_token": "legacy-token",
+    }})
+
+    assert _run_guarded(flask_app, "u1", "legacy-token") == "ok"
+    assert getattr(_run_guarded(flask_app, "u1", "nope"), "status_code", None) == 302
+
+
+def test_login_required_rejects_empty_set(fake_firebase, flask_app):
+    db, routes_auth, auth_api = fake_firebase
+    seed_users(db, {"u1": {
+        "email": "alice@example.com", "status": "Active",
+        "active_session_tokens": [],
+    }})
+
+    resp = _run_guarded(flask_app, "u1", "anything")
+    assert getattr(resp, "status_code", None) == 302

@@ -67,7 +67,7 @@ def api_register():
             "email": email,
             "role": "user",
             "password_hash": generate_password_hash(password),
-            "active_session_token": None,
+            "active_session_tokens": [],
             "bound_device_id": None,
             "subscription_status": False,
             "subscription_expiry": None,
@@ -130,8 +130,10 @@ def api_login():
 
         new_session_token = secrets.token_hex(64)
 
+        # ADD the new token to the user's valid-token set (migrating a legacy
+        # single token if present) so other devices stay logged in.
         db.collection("users").document(user_doc.id).update({
-            "active_session_token": new_session_token,
+            "active_session_tokens": auth.merge_session_token(user, new_session_token),
             "last_login": datetime.utcnow().isoformat(),
             "last_ip": ip,
         })
@@ -162,10 +164,8 @@ def api_logout():
     try:
         user_id = session.get("user_id")
         if user_id:
-            try:
-                db.collection("users").document(user_id).update({"active_session_token": None})
-            except Exception as exc:
-                current_app.logger.error(f"Logout Firestore error: {exc}")
+            # Revoke only THIS device's token → other devices stay logged in.
+            auth.remove_session_token(user_id, session.get("session_token"))
         session.clear()
         return jsonify({"success": True, "message": "Logged out."}), 200
     except Exception as exc:

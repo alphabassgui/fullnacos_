@@ -137,6 +137,54 @@ def log_suspicious_device(device_id: str, user_id: str, ip: str) -> None:
     })
 
 
+# ──────────────────────────────────────────────
+# MULTI-DEVICE SESSION TOKENS
+# Validate a session against a *set* of valid tokens per user so any number of
+# devices can stay logged in concurrently. Login ADDS a token to the set;
+# logout removes only the current device's token.
+# ──────────────────────────────────────────────
+
+def _tokens_from_user(user: dict) -> list:
+    """Return the user's set of valid session tokens as a list.
+
+    Backward-compat: docs written before this change carry a single
+    ``active_session_token`` string and no ``active_session_tokens`` set. When
+    the set is absent, treat the legacy single token as a one-member set so
+    already-logged-in users are not kicked out on deploy."""
+    tokens = user.get("active_session_tokens")
+    if tokens is None:
+        legacy = user.get("active_session_token")
+        tokens = [legacy] if legacy else []
+    return [t for t in tokens if t]
+
+
+def merge_session_token(user: dict, new_token: str) -> list:
+    """Compute the new token set for a login: the user's existing valid tokens
+    (migrating a legacy single token if present) plus ``new_token``. Pure — the
+    caller persists the returned list. De-duplicates while preserving order."""
+    tokens = _tokens_from_user(user)
+    if new_token and new_token not in tokens:
+        tokens = tokens + [new_token]
+    return tokens
+
+
+def remove_session_token(user_id: str, token: str) -> None:
+    """Revoke a single device: remove ``token`` from the user's valid-token set,
+    leaving every other device's session intact. Best-effort — Firestore errors
+    are logged, not raised, matching the existing logout behaviour."""
+    try:
+        user_ref = db.collection("users").document(user_id)
+        snapshot = user_ref.get()
+        if not snapshot.exists:
+            return
+        tokens = _tokens_from_user(snapshot.to_dict())
+        user_ref.update({
+            "active_session_tokens": [t for t in tokens if t != token],
+        })
+    except Exception as e:
+        current_app.logger.error(f"remove_session_token error: {e}")
+
+
 # ══════════════════════════════════════════════
 # ❷  SESSION TOKEN GUARD  (anti-sharing core)
 # ══════════════════════════════════════════════
@@ -169,19 +217,13 @@ def log_suspicious_device(device_id: str, user_id: str, ip: str) -> None:
 
 #             user = user_doc.to_dict()
 
-#             stored_token = user.get("active_session_token")
-#             if not stored_token or not session_token:
+#             tokens = _tokens_from_user(user)  # backward-compat with legacy single token
+#             ok = bool(session_token) and any(
+#                 hmac.compare_digest(t, session_token) for t in tokens
+#             )
+#             if not ok:
 #                 session.clear()
 #                 flash("Session expired. Please log in again.", "warning")
-#                 return redirect(url_for("auth.login"))
-
-#             if not hmac.compare_digest(stored_token, session_token):
-#                 session.clear()
-#                 flash(
-#                     "Your account was accessed from another device. "
-#                     "You have been logged out.",
-#                     "danger"
-#                 )
 #                 return redirect(url_for("auth.login"))
 
 #             if user.get("status") == "Disabled":
@@ -282,13 +324,13 @@ def login():
             except Exception as e:
                 current_app.logger.error(f"Device audit log error: {e}")
 
-        # ── New session token (invalidates all other sessions) ──
+        # ── New session token (ADDED to the set — other devices stay valid) ──
         new_session_token = secrets.token_hex(64)
         update_payload: dict = {
-            "active_session_token": new_session_token,
-            "last_login":           datetime.utcnow().isoformat(),
-            "bound_device_id":      device_id,
-            "last_ip":              ip,
+            "active_session_tokens": merge_session_token(user, new_session_token),
+            "last_login":            datetime.utcnow().isoformat(),
+            "bound_device_id":       device_id,
+            "last_ip":               ip,
         }
 
         db.collection("users").document(user_doc.id).update(update_payload)
@@ -335,13 +377,8 @@ def login():
 def logout():
     user_id = session.get("user_id")
     if user_id:
-        try:
-            # Wipe token → instantly invalidates all active sessions
-            db.collection("users").document(user_id).update({
-                "active_session_token": None
-            })
-        except Exception as e:
-            current_app.logger.error(f"Logout Firestore error: {e}")
+        # Revoke only THIS device's token → other devices stay logged in
+        remove_session_token(user_id, session.get("session_token"))
     session.clear()
     flash("You have been logged out.", "info")
     resp = redirect(url_for("auth.login"))
@@ -408,7 +445,7 @@ def registration():
             "email":                email,
             "role":                 "user",
             "password_hash":        generate_password_hash(password),
-            "active_session_token": None,
+            "active_session_tokens": [],
             "bound_device_id":      None,
             "subscription_status":  False,
             "subscription_expiry":  None,

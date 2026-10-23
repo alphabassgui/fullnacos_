@@ -10,9 +10,11 @@ from functools import wraps
 
 def login_required(f):
     """
-    Protects routes by verifying the session token matches Firestore.
-    If another device logs in, the stored token changes → this session
-    is immediately invalidated on the next request.
+    Protects routes by verifying the session token is one of the user's valid
+    session tokens in Firestore. Multiple devices can be logged in at once:
+    each login ADDS its token to the set, so logging in on a new device does
+    not invalidate existing ones. A session whose token is not in the set is
+    rejected.
     """
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -36,19 +38,23 @@ def login_required(f):
 
             user = user_doc.to_dict()
 
-            stored_token = user.get("active_session_token")
-            if not stored_token or not session_token:
+            # Validate the session token against the SET of valid tokens.
+            # Backward-compat: docs written before multi-device support carry a
+            # single `active_session_token` and no set → treat that legacy token
+            # as a one-member set so currently-logged-in users keep working.
+            stored_tokens = user.get("active_session_tokens")
+            if stored_tokens is None:
+                legacy = user.get("active_session_token")
+                stored_tokens = [legacy] if legacy else []
+
+            # Constant-time comparison per candidate (no timing-sensitive
+            # plain compare). Membership → this device's session is valid.
+            token_valid = bool(session_token) and any(
+                hmac.compare_digest(t, session_token) for t in stored_tokens if t
+            )
+            if not token_valid:
                 session.clear()
                 flash("Session expired. Please log in again.", "warning")
-                return redirect(url_for("auth.login"))
-
-            if not hmac.compare_digest(stored_token, session_token):
-                session.clear()
-                flash(
-                    "Your account was accessed from another device. "
-                    "You have been logged out.",
-                    "danger"
-                )
                 return redirect(url_for("auth.login"))
 
             if user.get("status") == "Disabled":
