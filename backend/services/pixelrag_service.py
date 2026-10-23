@@ -92,7 +92,7 @@ def render_and_tile_page(
     viewport_height: int = 800,
     device_scale_factor: float = 1.0,
     timeout_ms: int = 15000,
-    screenshot_timeout_ms: int = 20000,
+    screenshot_timeout_ms: int = 45000,
 ) -> Dict[str, Any]:
     """Render a web page using Playwright and slice into vertical tiles.
 
@@ -172,16 +172,33 @@ def render_and_tile_page(
                         # instead of the capture stalling until the explicit
                         # timeout — the "Page.screenshot: Timeout exceeded" failure
                         # mode on memory-constrained containers.
-                        screenshot_bytes = page.screenshot(
-                            clip={
-                                "x": 0,
-                                "y": 0,
-                                "width": viewport_width,
-                                "height": current_slice_height,
-                            },
-                            animations="disabled",
-                            timeout=screenshot_timeout_ms,
-                        )
+                        # A single slow tile must not void the whole run. On a
+                        # CPU/memory-starved container (e.g. Render free tier) the
+                        # screenshot can exceed its timeout; rather than letting that
+                        # bubble out and discard every tile, keep the tiles captured
+                        # so far and stop here — a partial visual beats "Visual
+                        # capture unavailable". The outer except still handles a
+                        # browser that never launched.
+                        try:
+                            screenshot_bytes = page.screenshot(
+                                clip={
+                                    "x": 0,
+                                    "y": 0,
+                                    "width": viewport_width,
+                                    "height": current_slice_height,
+                                },
+                                animations="disabled",
+                                timeout=screenshot_timeout_ms,
+                            )
+                        except Exception as shot_exc:
+                            logger.warning(
+                                "Tile screenshot failed at offset %s for %s; keeping %s tile(s) captured so far: %s",
+                                offset,
+                                url,
+                                len(tiles),
+                                shot_exc,
+                            )
+                            break
 
                         tile_url: Optional[str] = None
                         if isinstance(screenshot_bytes, bytes):

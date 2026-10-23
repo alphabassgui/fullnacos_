@@ -69,6 +69,50 @@ def test_render_and_tile_page_wheel_exception_tolerated(tmp_path):
         assert len(manifest["tiles"]) == 1
 
 
+def test_render_and_tile_page_screenshot_timeout_keeps_partial_tiles(tmp_path):
+    # A later tile's screenshot timing out must not discard the whole run:
+    # the tiles captured before the failure are kept and the manifest is written.
+    with patch("services.pixelrag_service.sync_playwright") as mock_pw:
+        mock_browser = MagicMock()
+        mock_page = MagicMock()
+        mock_pw.return_value.__enter__.return_value.chromium.launch.return_value = mock_browser
+        mock_browser.new_page.return_value = mock_page
+
+        mock_page.evaluate.side_effect = [2400]  # page height → 3 tiles if all succeed
+        # First two screenshots succeed, the third times out.
+        mock_page.screenshot.side_effect = [
+            b"tile-1",
+            b"tile-2",
+            Exception("Page.screenshot: Timeout 45000ms exceeded"),
+        ]
+
+        manifest = render_and_tile_page("https://slowtiles.com", str(tmp_path))
+
+        # Kept the two captured tiles instead of returning an empty manifest.
+        assert len(manifest["tiles"]) == 2
+        assert manifest["tiles"][0]["filename"] == "tile_0001_hero.webp"
+        assert manifest["tiles"][1]["filename"] == "tile_0002_value.webp"
+        assert (tmp_path / "manifest.json").exists()
+
+
+def test_render_and_tile_page_first_screenshot_timeout_yields_empty(tmp_path):
+    # When the very first tile times out there is nothing to keep, but it still
+    # degrades gracefully to an empty-tiles manifest rather than raising.
+    with patch("services.pixelrag_service.sync_playwright") as mock_pw:
+        mock_browser = MagicMock()
+        mock_page = MagicMock()
+        mock_pw.return_value.__enter__.return_value.chromium.launch.return_value = mock_browser
+        mock_browser.new_page.return_value = mock_page
+
+        mock_page.evaluate.side_effect = [2400]
+        mock_page.screenshot.side_effect = Exception("Page.screenshot: Timeout 45000ms exceeded")
+
+        manifest = render_and_tile_page("https://deadtiles.com", str(tmp_path))
+
+        assert manifest["tiles"] == []
+        assert (tmp_path / "manifest.json").exists()
+
+
 def test_render_and_tile_page_empty_page(tmp_path):
     with patch("services.pixelrag_service.sync_playwright") as mock_pw:
         mock_browser = MagicMock()
