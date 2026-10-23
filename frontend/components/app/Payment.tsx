@@ -34,6 +34,7 @@ import { getPlan, priceAll } from "@/lib/billing/pricing";
 import type { PlanId } from "@/lib/billing/plans.config";
 import { fetchMe, isFlaskConfigured } from "@/lib/api";
 import { hasCompletedOnboarding, maybeSyncPendingOnboarding } from "@/lib/onboarding";
+import { postAuthDest } from "@/lib/redirect";
 
 // Product surface tokens — Signal Blue dashboard values, flip under data-theme="light".
 const C = {
@@ -920,7 +921,7 @@ function Verified({
   }, [flask]);
 
   const loading = onboarded === null;
-  const destination = onboarded ? "/opportunities" : "/welcome";
+  const destination = postAuthDest(!!onboarded);
   const ctaLabel = loading ? "One moment…" : onboarded ? "Go to my dashboard" : "Continue setup";
   const when = paidAt ? new Date(paidAt) : new Date();
   const dateStr = when.toLocaleString("en-GB", {

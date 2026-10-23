@@ -24,7 +24,12 @@ import { useEffect, useRef } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 import { isFlaskConfigured } from "@/lib/api";
-import { safeInternalPath } from "@/lib/redirect";
+import {
+  isInternalPath,
+  onboardedOptimistic,
+  postAuthDest,
+  serverOnboarded,
+} from "@/lib/redirect";
 import { AppLoader } from "./AppLoader";
 
 /**
@@ -58,10 +63,11 @@ export function RequireAuth({ children }: { children: ReactNode }) {
 
 /**
  * Gate a GUEST-ONLY route (/login, /signup). An already-authenticated visitor is
- * sent to the sanitized ?callbackUrl or /opportunities. The redirect fires only on
- * the FIRST resolution of the session check, so a user who logs in while on the
- * page is navigated by the auth screen itself (to /welcome, /pay, …) without this
- * guard racing it to /opportunities.
+ * sent to an explicit, sanitized ?callbackUrl if present, otherwise to the
+ * onboarding-aware default (postAuthDest): /opportunities when finished, /welcome
+ * when still in setup. The redirect fires only on the FIRST resolution of the
+ * session check, so a user who logs in while on the page is navigated by the auth
+ * screen itself (to /welcome, /pay, …) without this guard racing it.
  */
 export function RequireGuest({ children }: { children: ReactNode }) {
   const { loading, status, user } = useAuth();
@@ -76,15 +82,15 @@ export function RequireGuest({ children }: { children: ReactNode }) {
     if (decidedRef.current) return;
     decidedRef.current = true;
     if (!authed) return;
-    let dest = "/opportunities";
+    let raw: string | null = null;
     try {
-      const raw = new URLSearchParams(window.location.search).get("callbackUrl");
-      dest = safeInternalPath(raw, "/opportunities");
+      raw = new URLSearchParams(window.location.search).get("callbackUrl");
     } catch {
-      // window unavailable / malformed query: keep the default.
+      // window unavailable / malformed query: fall through to the default.
     }
+    const dest = isInternalPath(raw) ? raw : postAuthDest(onboardedOptimistic(user));
     router.replace(dest);
-  }, [configured, loading, authed, router]);
+  }, [configured, loading, authed, user, router]);
 
   // Demo mode: nothing to gate.
   if (!configured) return <>{children}</>;
@@ -92,4 +98,71 @@ export function RequireGuest({ children }: { children: ReactNode }) {
   if (loading || authed) return <AppLoader />;
   // Unauthenticated or "unknown": show the auth screen.
   return <>{children}</>;
+}
+
+/**
+ * Gate the onboarding sequence by onboarding status, keyed on the single invariant:
+ * a not-yet-onboarded authed user belongs in welcome → onboarding → analysing; a
+ * finished user belongs on /opportunities. Applied via the per-segment layouts,
+ * nested inside RequireAuth, so it only runs once the session is resolved and
+ * authenticated ("unknown"/"unauthenticated" are left to RequireAuth — never
+ * bounce on a transient backend error).
+ *
+ * The destination gate (requirement="onboarded", on /opportunities) reads the
+ * OPTIMISTIC view (server flag OR the local cache markOnboarded() sets at finish())
+ * so a user who just completed setup is not bounced back before the server flag
+ * catches up. The sequence gate (requirement="not-onboarded") reads the SERVER flag
+ * only, because that cache is set mid-sequence (at finish(), before /analysing) and
+ * must not eject a user who still needs to pass through the scan. Both route through
+ * the same postAuthDest direction rule, so the layers cannot disagree — and because
+ * each gate only ever says "stay" for the page the user is actually on, no pair of
+ * gates can bounce a user back and forth (loop-free).
+ *
+ * DEMO SAFETY: when Flask is not configured both no-op and render children, exactly
+ * like RequireAuth/RequireGuest.
+ */
+function OnboardingGate({
+  children,
+  requirement,
+}: {
+  children: ReactNode;
+  requirement: "onboarded" | "not-onboarded";
+}) {
+  const { loading, status, user } = useAuth();
+  const router = useRouter();
+  const configured = isFlaskConfigured();
+  const decidedRef = useRef(false);
+
+  // Only decide on a RESOLVED, authenticated session.
+  const resolved = configured && !loading && status === "authenticated" && !!user;
+  const onboarded =
+    requirement === "onboarded" ? onboardedOptimistic(user) : serverOnboarded(user);
+  const belongs = requirement === "onboarded" ? onboarded : !onboarded;
+
+  useEffect(() => {
+    if (!resolved) return;
+    if (decidedRef.current) return;
+    decidedRef.current = true;
+    if (belongs) return;
+    router.replace(postAuthDest(onboarded));
+  }, [resolved, belongs, onboarded, router]);
+
+  // Demo mode: nothing to gate.
+  if (!configured) return <>{children}</>;
+  // Verifying, or a guest RequireAuth is about to bounce: never flash the gated UI.
+  if (loading || status === "unauthenticated") return <AppLoader />;
+  // Authenticated but on the wrong side of the gate: show the loader until we replace.
+  if (resolved && !belongs) return <AppLoader />;
+  // Belongs here, or "unknown" (don't bounce on a transient backend error).
+  return <>{children}</>;
+}
+
+/** Protect a finished-user route (/opportunities): a not-yet-onboarded user is sent to /welcome. */
+export function RequireOnboarded({ children }: { children: ReactNode }) {
+  return <OnboardingGate requirement="onboarded">{children}</OnboardingGate>;
+}
+
+/** Protect a sequence route (welcome/onboarding/analysing): a finished user is sent to /opportunities. */
+export function RequireNotOnboarded({ children }: { children: ReactNode }) {
+  return <OnboardingGate requirement="not-onboarded">{children}</OnboardingGate>;
 }

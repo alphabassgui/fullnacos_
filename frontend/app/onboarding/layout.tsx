@@ -1,6 +1,10 @@
 import type { ReactNode } from "react";
-import { RequireAuth } from "@/components/app/guards";
+import { RequireAuth, RequireNotOnboarded } from "@/components/app/guards";
 
 export default function ProtectedLayout({ children }: { children: ReactNode }) {
-  return <RequireAuth>{children}</RequireAuth>;
+  return (
+    <RequireAuth>
+      <RequireNotOnboarded>{children}</RequireNotOnboarded>
+    </RequireAuth>
+  );
 }

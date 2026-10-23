@@ -7,8 +7,9 @@ import { useRouter } from "next/navigation";
 import { Wordmark, Icons } from "@/components/ds";
 import { useMediaQuery } from "./use-media-query";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
-import { isFlaskConfigured, login as flaskLogin, register as flaskRegister } from "@/lib/api";
+import { fetchMe, isFlaskConfigured, login as flaskLogin, register as flaskRegister } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
+import { onboardedOptimistic, postAuthDest } from "@/lib/redirect";
 import { getStoredDemoUser, saveDemoUser } from "@/lib/demo-user";
 
 /**
@@ -565,17 +566,24 @@ export function AuthScreen({ mode, callbackUrl }: { mode: "signup" | "login"; ca
       // Populate the shared auth state before navigating so the destination's
       // RequireAuth sees the signed-in user instead of bouncing back to /login.
       await refresh();
-      router.push(callbackUrl ?? "/opportunities");
+      // Route by onboarding status: a user who abandoned setup goes back into the
+      // sequence (/welcome) instead of skipping it. refresh() updates the context
+      // asynchronously, so read the authoritative user from a fresh fetchMe() rather
+      // than the (still stale) closure value. An explicit callbackUrl wins.
+      const me = await fetchMe();
+      const dest = postAuthDest(onboardedOptimistic(me.state === "authenticated" ? me.user : null));
+      router.push(callbackUrl ?? dest);
       return;
     }
 
     const supabase = getSupabaseBrowserClient();
     // Demo mode (no Supabase env): keep the mock push. Only the email is typed at
     // login, so merge it into any identity saved at sign-up (keeping name/business).
+    // No backend here, so route off the local onboarding cache.
     if (!supabase) {
       const prior = getStoredDemoUser() ?? { name: null, businessName: null };
       saveDemoUser({ ...prior, email: email.trim() || null });
-      router.push(callbackUrl ?? "/opportunities");
+      router.push(callbackUrl ?? postAuthDest(onboardedOptimistic(null)));
       return;
     }
     setSubmitting(true);
@@ -585,7 +593,7 @@ export function AuthScreen({ mode, callbackUrl }: { mode: "signup" | "login"; ca
       setError(signInError.message);
       return;
     }
-    router.push("/opportunities");
+    router.push(callbackUrl ?? postAuthDest(onboardedOptimistic(null)));
   };
 
   const signUpForm = (
