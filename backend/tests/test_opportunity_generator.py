@@ -24,6 +24,7 @@ VALID_ITEM = {
     "title": "Missing pricing page",
     "description": "No pricing info visible.",
     "problem": "Pricing transparency gap.",
+    "problem_key": "pricing_transparency",
     "evidence": ["No pricing links found in navigation"],
     "potential_impact": "high",
     "confidence": 0.9,
@@ -55,7 +56,9 @@ def fake_client(monkeypatch):
     state = {"calls": []}
 
     def build(content):
-        def create(*, model=None, messages=None, temperature=None):
+        def create(*, model=None, messages=None, temperature=None, **kwargs):
+            # The generator also passes response_format (JSON-schema mode); accept
+            # and ignore any extra kwargs so the fake matches the real client call.
             state["calls"].append(
                 {"model": model, "messages": messages, "temperature": temperature}
             )
@@ -68,7 +71,7 @@ def fake_client(monkeypatch):
 
 
 def test_valid_array_returns_validated_opportunities(og, fake_client, monkeypatch):
-    payload = json.dumps([VALID_ITEM])
+    payload = json.dumps({"opportunities": [VALID_ITEM]})
     monkeypatch.setattr(og, "client", fake_client["build"](payload))
     result = og.generate_opportunities(ANALYSIS)
     assert result == [VALID_ITEM]
@@ -81,7 +84,9 @@ def test_valid_array_returns_validated_opportunities(og, fake_client, monkeypatc
 
 def test_model_reads_groq_model_env(og, fake_client, monkeypatch):
     monkeypatch.setenv("GROQ_MODEL", "custom-model")
-    monkeypatch.setattr(og, "client", fake_client["build"](json.dumps([VALID_ITEM])))
+    monkeypatch.setattr(
+        og, "client", fake_client["build"](json.dumps({"opportunities": [VALID_ITEM]}))
+    )
     og.generate_opportunities(ANALYSIS)
     assert fake_client["calls"][0]["model"] == "custom-model"
 
@@ -98,14 +103,26 @@ def test_invalid_json_raises(og, fake_client, monkeypatch):
         og.generate_opportunities(ANALYSIS)
 
 
-def test_non_array_raises(og, fake_client, monkeypatch):
+def test_non_object_payload_raises(og, fake_client, monkeypatch):
+    # A bare JSON array (not the expected {"opportunities": [...]} object).
+    monkeypatch.setattr(og, "client", fake_client["build"](json.dumps([VALID_ITEM])))
+    with pytest.raises(ValueError, match="Opportunity response must be a JSON object"):
+        og.generate_opportunities(ANALYSIS)
+
+
+def test_missing_opportunities_array_raises(og, fake_client, monkeypatch):
+    # A JSON object without the required "opportunities" array.
     monkeypatch.setattr(og, "client", fake_client["build"]('{"a": 1}'))
-    with pytest.raises(ValueError, match="Opportunity response must be a JSON array"):
+    with pytest.raises(
+        ValueError, match="Opportunity response must contain an 'opportunities' array"
+    ):
         og.generate_opportunities(ANALYSIS)
 
 
 def test_schema_violation_raises(og, fake_client, monkeypatch):
     broken = dict(VALID_ITEM, confidence=2)
-    monkeypatch.setattr(og, "client", fake_client["build"](json.dumps([broken])))
+    monkeypatch.setattr(
+        og, "client", fake_client["build"](json.dumps({"opportunities": [broken]}))
+    )
     with pytest.raises(ValueError, match="confidence 2 out of range"):
         og.generate_opportunities(ANALYSIS)

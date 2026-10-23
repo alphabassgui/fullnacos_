@@ -79,18 +79,29 @@ def execution_env(monkeypatch):
     return execution_engine, db
 
 
-def test_execute_action_completed_social(execution_env):
+def test_execute_action_completed_social(execution_env, monkeypatch):
     execution_engine, db = execution_env
     biz_ref = db.collection("businesses").document("b1")
-    biz_ref.collection("executions").document("e1").set({"action_id": "a1"})
+    biz_ref.collection("executions").document("e1").set(
+        {"action_id": "a1", "status": "queued"}
+    )
     biz_ref.collection("actions").document("a1").set(
         {"action_type": "social", "status": "approved"}
     )
 
+    # Use a fake connector so the engine's completed-lifecycle logic is tested
+    # without the real Instagram publisher (network / live connection).
+    monkeypatch.setattr(
+        execution_engine,
+        "get_connector",
+        lambda action: _FakeConnector({"success": True, "status": "published"}),
+    )
+    _stub_post_execute(execution_engine, monkeypatch)
+
     result = execution_engine.execute_action("b1", "e1")
 
     assert result["success"] is True
-    assert result["status"] == "not_implemented"
+    assert result["status"] == "published"
 
     execution_ref = biz_ref.collection("executions").document("e1")
     assert execution_ref.data["status"] == "completed"
@@ -98,6 +109,9 @@ def test_execute_action_completed_social(execution_env):
     assert execution_ref.data["started_at"]
     assert execution_ref.data["completed_at"]
     assert execution_ref.data["updated_at"]
+    # The action doc mirrors the completed lifecycle (the Campaigns list reads it).
+    action_ref = biz_ref.collection("actions").document("a1")
+    assert action_ref.data["status"] == "completed"
 
 
 def test_execute_action_unrouted_type_marks_failed(execution_env):

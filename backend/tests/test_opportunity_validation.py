@@ -8,6 +8,7 @@ def _valid_item(**overrides):
         "title": "Missing pricing page",
         "description": "No pricing information visible on the site.",
         "problem": "Pricing transparency gap on the home page.",
+        "problem_key": "pricing_transparency",
         "evidence": ["No pricing links found in navigation"],
         "potential_impact": "high",
         "confidence": 0.9,
@@ -98,13 +99,13 @@ def test_more_than_five_raises():
         v.validate_opportunities(items)
 
 
-def test_out_of_order_raises():
-    items = [
-        _valid_item(potential_impact="low", confidence=0.4),
-        _valid_item(potential_impact="high", confidence=0.9),
-    ]
-    with pytest.raises(ValueError, match="opportunities out of order at index 1"):
-        v.validate_opportunities(items)
+def test_out_of_order_is_sorted_into_non_increasing_order():
+    # The validator normalizes ordering by sorting (impact rank, confidence)
+    # descending, rather than rejecting out-of-order input.
+    low = _valid_item(potential_impact="low", confidence=0.4)
+    high = _valid_item(potential_impact="high", confidence=0.9)
+    result = v.validate_opportunities([low, high])
+    assert result == [high, low]
 
 
 # Ordering is non-increasing, not strictly decreasing: identical (impact,
