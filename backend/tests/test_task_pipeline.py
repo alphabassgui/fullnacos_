@@ -226,6 +226,101 @@ def test_invalid_opportunity_data_marks_run_failed(task_env, monkeypatch):
     assert not biz_ref.collection("opportunities").docs
 
 
+def test_invalid_middle_opportunity_is_skipped_and_run_completes(task_env, monkeypatch):
+    task_mod, db = task_env
+    import agent.opportunity_generator as generator_mod
+    import services.opportunity_service as opp_service
+    import services.opportunity_action_service as planner_mod
+
+    items = [
+        dict(VALID_OPPORTUNITY, title="One"),
+        dict(VALID_OPPORTUNITY, title="Bad", type="not-a-type"),
+        dict(VALID_OPPORTUNITY, title="Three"),
+    ]
+    monkeypatch.setattr(
+        generator_mod, "generate_opportunities", lambda analysis: items
+    )
+
+    def fake_create(business_id, opportunity, owner_id):
+        if opportunity["title"] == "Bad":
+            raise ValueError("Opportunity 1: type 'not-a-type' not in [...]")
+        return {"id": f"opp-{opportunity['title']}"}
+
+    monkeypatch.setattr(opp_service, "create_opportunity", fake_create)
+
+    seen = {}
+
+    def fake_planner(business_id, owner_id, business_analysis, opportunity_ids=None):
+        seen["ids"] = list(opportunity_ids)
+        return {"actions_created": len(opportunity_ids), "actions_existing": 0}
+
+    monkeypatch.setattr(
+        planner_mod, "generate_actions_for_opportunities", fake_planner
+    )
+
+    result = task_mod.analyze_business_website.run("b1", "u1", "r1")
+
+    biz_ref = db.collection("businesses").document("b1")
+    run_ref = biz_ref.collection("agent_runs").document("r1")
+
+    # Run completes; the two valid opportunities persist, the bad one is skipped.
+    assert result["success"] is True
+    assert result["opportunity_ids"] == ["opp-One", "opp-Three"]
+    assert "opp-Bad" not in result["opportunity_ids"]
+    # The planner received exactly the surviving ids.
+    assert seen["ids"] == result["opportunity_ids"]
+    # Terminal state is completed, not failed.
+    assert run_ref.data["analysis_status"] == "completed"
+    assert run_ref.data["status"] == "awaiting_approval"
+    assert run_ref.data["opportunity_ids"] == result["opportunity_ids"]
+    assert not any(u.get("analysis_status") == "failed" for u in run_ref.updates)
+
+
+def test_all_opportunities_skipped_still_completes_with_empty_ids(task_env, monkeypatch):
+    task_mod, db = task_env
+    import agent.opportunity_generator as generator_mod
+    import services.opportunity_service as opp_service
+    import services.opportunity_action_service as planner_mod
+
+    monkeypatch.setattr(
+        generator_mod, "generate_opportunities",
+        lambda analysis: [
+            dict(VALID_OPPORTUNITY, title="A"),
+            dict(VALID_OPPORTUNITY, title="B"),
+        ],
+    )
+
+    def fake_create(business_id, opportunity, owner_id):
+        raise ValueError("every opportunity is invalid")
+
+    monkeypatch.setattr(opp_service, "create_opportunity", fake_create)
+
+    seen = {}
+
+    def fake_planner(business_id, owner_id, business_analysis, opportunity_ids=None):
+        # Must not crash on an empty list; record what it received.
+        seen["ids"] = list(opportunity_ids)
+        return {"actions_created": 0, "actions_existing": 0}
+
+    monkeypatch.setattr(
+        planner_mod, "generate_actions_for_opportunities", fake_planner
+    )
+
+    # No exception even though all opportunities were skipped.
+    result = task_mod.analyze_business_website.run("b1", "u1", "r1")
+
+    biz_ref = db.collection("businesses").document("b1")
+    run_ref = biz_ref.collection("agent_runs").document("r1")
+
+    assert result["success"] is True
+    assert result["opportunity_ids"] == []
+    assert seen["ids"] == []
+    assert run_ref.data["analysis_status"] == "completed"
+    assert run_ref.data["status"] == "awaiting_approval"
+    assert run_ref.data["opportunity_ids"] == []
+    assert not any(u.get("analysis_status") == "failed" for u in run_ref.updates)
+
+
 def test_empty_opportunities_completes_run_with_no_docs(task_env):
     task_mod, db = task_env
 
