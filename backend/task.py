@@ -60,6 +60,7 @@ def analyze_business_website(self, business_id, user_id, run_id):
     if not business_doc.exists:
         run_ref.update({
             "analysis_status": "failed",
+            "status": "failed",
             "error": "Business not found",
             "completed_at": datetime.utcnow().isoformat(),
         })
@@ -73,6 +74,7 @@ def analyze_business_website(self, business_id, user_id, run_id):
     if business.get("owner_id") != user_id:
         run_ref.update({
             "analysis_status": "failed",
+            "status": "failed",
             "error": "Unauthorized",
             "completed_at": datetime.utcnow().isoformat(),
         })
@@ -86,6 +88,7 @@ def analyze_business_website(self, business_id, user_id, run_id):
     if not website_url:
         run_ref.update({
             "analysis_status": "failed",
+            "status": "failed",
             "error": "Business has no website URL",
             "completed_at": datetime.utcnow().isoformat(),
         })
@@ -185,6 +188,7 @@ def analyze_business_website(self, business_id, user_id, run_id):
         except Exception as exc:
             run_ref.update({
                 "analysis_status": "failed",
+                "status": "failed",
                 "error": str(exc),
                 "completed_at": datetime.utcnow().isoformat(),
             })
@@ -203,6 +207,7 @@ def analyze_business_website(self, business_id, user_id, run_id):
         # Mark run as failed
         run_ref.update({
             "analysis_status": "failed",
+            "status": "failed",
             "error": str(exc),
             "completed_at": datetime.utcnow().isoformat(),
         })

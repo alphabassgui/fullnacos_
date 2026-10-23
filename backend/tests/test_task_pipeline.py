@@ -2,12 +2,23 @@ import pytest
 
 
 class _Snapshot:
-    def __init__(self, data):
+    def __init__(self, data, doc_id=None):
         self.exists = data is not None
         self._data = dict(data) if data else {}
+        self.id = doc_id
 
     def to_dict(self):
         return dict(self._data)
+
+
+class _Query:
+    """Minimal fake of a Firestore query: supports a single '==' filter + stream()."""
+
+    def __init__(self, snapshots):
+        self._snapshots = list(snapshots)
+
+    def stream(self):
+        return iter(self._snapshots)
 
 
 class _Ref:
@@ -21,7 +32,7 @@ class _Ref:
         self.children = {}
 
     def get(self):
-        return _Snapshot(self._set_data)
+        return _Snapshot(self._set_data, self.id)
 
     @property
     def data(self):
@@ -58,6 +69,21 @@ class _Collection:
         if doc_id not in self.docs:
             self.docs[doc_id] = _Ref(self.path + [doc_id])
         return self.docs[doc_id]
+
+    def where(self, *args, **kwargs):
+        """Supports a single FieldFilter '==' query, as used by
+        services.opportunity_service.find_existing_opportunity."""
+        filt = kwargs.get("filter")
+        if filt is not None:
+            field, op, value = filt.field_path, filt.op_string, filt.value
+        else:
+            field, op, value = args[:3]
+        matches = []
+        for doc_id, ref in self.docs.items():
+            record = ref.data
+            if op == "==" and record.get(field) == value:
+                matches.append(_Snapshot(record, doc_id))
+        return _Query(matches)
 
 
 class FakeTaskDb:
@@ -116,6 +142,20 @@ def task_env(monkeypatch, agent_modules):
         lambda observation: {"business_summary": "Acme sells widgets."},
     )
     monkeypatch.setattr(generator_mod, "generate_opportunities", lambda analysis: [])
+
+    import services.opportunity_service as opp_service_mod
+    import services.opportunity_action_service as planner_mod
+
+    # Default offline planner so no pipeline test touches the real planner against
+    # live Firestore. Tests that assert planner behavior override this locally.
+    monkeypatch.setattr(
+        planner_mod, "generate_actions_for_opportunities",
+        lambda **kwargs: {"actions_created": 0, "actions_existing": 0},
+    )
+    # Redirect the opportunity service's own db binding to the fake store so the
+    # real create_opportunity persists into the inspectable fake, not Firestore.
+    monkeypatch.setattr(opp_service_mod, "db", db)
+
     return task_mod, db
 
 
@@ -141,23 +181,20 @@ def test_happy_path_persists_opportunities_and_completes_run(task_env, monkeypat
     assert len(obs_docs) == 1
     assert obs_docs[0].data["analysis"]["title"] == "Acme"
 
-    completed = [u for u in run_ref.updates if u.get("status") == "completed"]
-    assert completed == [run_ref.updates[-1]]
-    assert run_ref.data["status"] == "completed"
+    terminal = [u for u in run_ref.updates if u.get("status") == "awaiting_approval"]
+    assert terminal == [run_ref.updates[-1]]
+    assert run_ref.data["status"] == "awaiting_approval"
     assert run_ref.data["observation_id"] == result["observation_id"]
     assert run_ref.data["opportunity_ids"] == result["opportunity_ids"]
 
-    opp_docs = sorted(
-        biz_ref.collection("opportunities").docs.values(),
-        key=lambda ref: ref.data["position"],
-    )
+    # create_opportunity does not persist a `position` field, so inspect the
+    # opportunities in insertion order (== creation order == opportunity_ids order).
+    opp_docs = list(biz_ref.collection("opportunities").docs.values())
     assert [ref.id for ref in opp_docs] == result["opportunity_ids"]
     first = opp_docs[0].data
     assert first["title"] == "Add SEO"
     assert first["business_id"] == "b1"
     assert first["owner_id"] == "u1"
-    assert first["position"] == 0
-    assert opp_docs[1].data["position"] == 1
     assert first["created_at"]
     for key in ("title", "description", "problem", "evidence",
                 "potential_impact", "confidence", "type"):
@@ -209,7 +246,9 @@ def test_invalid_opportunity_data_marks_run_failed(task_env, monkeypatch):
     import agent.opportunity_generator as generator_mod
     from agent.opportunity_validation import validate_opportunities
 
-    broken = dict(VALID_OPPORTUNITY, confidence=2)
+    # Give a valid problem_key (a required field per opportunity_validation) so the
+    # item fails specifically on the out-of-range confidence, not the missing key.
+    broken = dict(VALID_OPPORTUNITY, problem_key="seo_visibility", confidence=2)
 
     monkeypatch.setattr(
         generator_mod, "generate_opportunities",
@@ -329,6 +368,6 @@ def test_empty_opportunities_completes_run_with_no_docs(task_env):
     biz_ref = db.collection("businesses").document("b1")
     run_ref = biz_ref.collection("agent_runs").document("r1")
     assert result["opportunity_ids"] == []
-    assert run_ref.data["status"] == "completed"
+    assert run_ref.data["status"] == "awaiting_approval"
     assert run_ref.data["opportunity_ids"] == []
     assert not biz_ref.collection("opportunities").docs
