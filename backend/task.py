@@ -141,14 +141,28 @@ def analyze_business_website(self, business_id, user_id, run_id):
             opportunity_ids = []
 
             for position, opp in enumerate(opportunities):
-                result = create_opportunity(
-                    business_id=business_id,
-                    opportunity=opp,
-                    owner_id=user_id,
-                )
+                # Per-item isolation: a single invalid AI-generated opportunity
+                # (off-list type/problem_key, missing key, bad evidence/
+                # confidence) must not fail the whole run. Skip & log it so the
+                # valid opportunities from the same run still persist.
+                try:
+                    result = create_opportunity(
+                        business_id=business_id,
+                        opportunity=opp,
+                        owner_id=user_id,
+                    )
 
-                opportunity_ids.append(result["id"])
-            
+                    opportunity_ids.append(result["id"])
+                except Exception as exc:
+                    logger.warning(
+                        "Skipping invalid opportunity at position %s "
+                        "(type=%s): %s",
+                        position,
+                        opp.get("type") if isinstance(opp, dict) else None,
+                        exc,
+                    )
+                    continue
+
             planner_result = generate_actions_for_opportunities(
                 business_id=business_id,
                 owner_id=user_id,
