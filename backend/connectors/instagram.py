@@ -12,6 +12,7 @@ class InstagramConnector(BaseConnector):
         action,
         business_id,
         user_id,
+        execution_id=None,
     ):
         """
         Execute an approved Instagram action.
