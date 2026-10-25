@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import type { CSSProperties, ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Icons, Logomark, Wordmark } from "@/components/ds";
@@ -10,8 +10,9 @@ import { useIsMobile, usePrefersReducedMotion } from "./use-media-query";
 import { Tour } from "./Tour";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 import { useUser } from "@/lib/use-user";
-import { isFlaskConfigured, logout as flaskLogout } from "@/lib/api";
+import { deleteAccount, isFlaskConfigured, logout as flaskLogout } from "@/lib/api";
 import { clearDemoUser } from "@/lib/demo-user";
+import { clearCurrentBusinessId } from "@/lib/current-business";
 import { useAuth } from "@/lib/auth-context";
 import { useSidebarCollapsed, toggleSidebarCollapsed } from "@/lib/sidebar";
 import { useTour } from "@/lib/tour";
@@ -227,6 +228,7 @@ function SidebarContent({
         )}
         <AccountButton collapsed={collapsed} name={accountName} sub={accountSub} />
         <LogoutButton onNavigate={onNavigate} collapsed={collapsed} />
+        <DeleteAccountButton onNavigate={onNavigate} collapsed={collapsed} email={accountSub} />
       </div>
     </>
   );
@@ -363,6 +365,375 @@ function LogoutButton({ onNavigate, collapsed = false }: { onNavigate?: () => vo
       <TooltipTrigger asChild>{button}</TooltipTrigger>
       <TooltipContent side="right">Log out</TooltipContent>
     </Tooltip>
+  );
+}
+
+/** De-emphasized destructive control, below Log out: opens a typed-email confirmation modal that
+ *  hard-deletes the account (DELETE /api/auth/account). Hidden in demo mode (no Flask backend) or
+ *  until we have the account email to confirm against — there is nothing to delete and nothing to
+ *  match, so offering a dead destructive control would be wrong. Collapsed rail mirrors
+ *  LogoutButton's glyph + tooltip; the trigger only opens the modal, it never deletes on a tap. */
+function DeleteAccountButton({
+  onNavigate,
+  collapsed = false,
+  email,
+}: {
+  onNavigate?: () => void;
+  collapsed?: boolean;
+  email: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const trimmedEmail = email.trim();
+
+  // Only meaningful with a real backend and a real email to confirm against.
+  if (!isFlaskConfigured() || !trimmedEmail) return null;
+
+  const button = (
+    <button
+      type="button"
+      onClick={() => setOpen(true)}
+      className="gv-nav-item"
+      aria-label={collapsed ? "Delete account" : undefined}
+      aria-haspopup="dialog"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: collapsed ? "center" : "flex-start",
+        gap: 8,
+        width: "100%",
+        textAlign: "left",
+        padding: collapsed ? "8px 0" : "6px 10px",
+        borderRadius: 8,
+        border: "none",
+        background: "transparent",
+        cursor: "pointer",
+        fontFamily: BODY,
+        fontSize: 12,
+        lineHeight: "16px",
+        color: C.bad,
+      }}
+    >
+      {collapsed ? <DeleteGlyph /> : "Delete account"}
+    </button>
+  );
+
+  return (
+    <>
+      {collapsed ? (
+        <Tooltip>
+          <TooltipTrigger asChild>{button}</TooltipTrigger>
+          <TooltipContent side="right">Delete account</TooltipContent>
+        </Tooltip>
+      ) : (
+        button
+      )}
+      {open && (
+        <DeleteAccountModal email={trimmedEmail} onNavigate={onNavigate} onClose={() => setOpen(false)} />
+      )}
+    </>
+  );
+}
+
+/** Confirmation modal for the irreversible account delete. The app has no shared Dialog primitive,
+ *  so this mirrors the hand-rolled pattern used by OpportunitiesEmptyState's AddWebsiteModal: a
+ *  fixed backdrop (click to close), a focus trap, Esc-to-close, and a body-scroll lock. The
+ *  [Delete account] button stays disabled until the typed value, trimmed + lowercased, matches the
+ *  account email. On success (or an already-gone 401) it mirrors LogoutButton's teardown — clear
+ *  the cached business, refresh the auth cache, then replace to /login so Back can't return to a
+ *  dead session. 400 / other errors stay in the modal for a retry. Copy describes deletion only. */
+function DeleteAccountModal({
+  email,
+  onNavigate,
+  onClose,
+}: {
+  email: string;
+  onNavigate?: () => void;
+  onClose: () => void;
+}) {
+  const router = useRouter();
+  const { refresh } = useAuth();
+  const m = useIsMobile();
+  const titleId = useId();
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const restoreFocusRef = useRef<Element | null>(null);
+
+  const [typed, setTyped] = useState("");
+  const [focused, setFocused] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const matches = typed.trim().toLowerCase() === email.trim().toLowerCase();
+
+  // Scroll-lock the page, focus the input on open, restore focus to the trigger on close.
+  useEffect(() => {
+    restoreFocusRef.current = document.activeElement;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const t = window.setTimeout(() => inputRef.current?.focus(), 0);
+    return () => {
+      window.clearTimeout(t);
+      document.body.style.overflow = prevOverflow;
+      const el = restoreFocusRef.current;
+      if (el instanceof HTMLElement) el.focus();
+    };
+  }, []);
+
+  // Cancel: close + clear the field. Blocked while a delete is in flight.
+  const close = useCallback(() => {
+    if (deleting) return;
+    setTyped("");
+    setError(null);
+    onClose();
+  }, [deleting, onClose]);
+
+  const onKeyDown = useCallback(
+    (e: ReactKeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        close();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const root = panelRef.current;
+      if (!root) return;
+      const focusable = root.querySelectorAll<HTMLElement>(
+        'a[href],button:not([disabled]),input:not([disabled]),[tabindex]:not([tabindex="-1"])',
+      );
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey && active === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    },
+    [close],
+  );
+
+  const onConfirm = async () => {
+    if (!matches || deleting) return;
+    setDeleting(true);
+    setError(null);
+    try {
+      const res = await deleteAccount(typed.trim());
+      if (res.ok || res.status === 401) {
+        // Deleted, or the session is already gone — same client teardown as Log out, then replace
+        // (not push) so the browser Back button can't return to a now-dead session.
+        clearCurrentBusinessId();
+        await refresh();
+        onNavigate?.();
+        router.replace("/login");
+        return;
+      }
+      // 400 email mismatch or any other error — keep the modal open and let them retry.
+      setError((res.data?.error as string) ?? "I couldn't delete your account. Please try again.");
+    } catch {
+      setError("I couldn't reach the server. Please check your connection and try again.");
+    }
+    setDeleting(false);
+  };
+
+  const inputTone = error ? C.bad : focused ? C.blue : C.border;
+
+  return (
+    <div
+      onClick={close}
+      onKeyDown={onKeyDown}
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 60,
+        display: "flex",
+        alignItems: m ? "flex-end" : "center",
+        justifyContent: "center",
+        padding: m ? 0 : 24,
+        background: "rgba(1,4,12,0.6)",
+        boxSizing: "border-box",
+      }}
+    >
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: m ? "100%" : "min(440px, calc(100vw - 48px))",
+          maxHeight: m ? "90dvh" : "calc(100dvh - 48px)",
+          overflowY: "auto",
+          boxSizing: "border-box",
+          background: C.s1,
+          border: "1px solid " + C.border,
+          borderRadius: m ? "16px 16px 0 0" : 16,
+          padding: m ? "24px 16px calc(24px + env(safe-area-inset-bottom))" : 28,
+          display: "flex",
+          flexDirection: "column",
+          gap: 18,
+          boxShadow: "0 24px 64px rgba(1,4,12,0.5)",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, flex: 1, minWidth: 0 }}>
+            <span style={MONO_EYEBROW}>Groville</span>
+            <h2
+              id={titleId}
+              style={{
+                margin: 0,
+                fontFamily: DISPLAY,
+                fontWeight: 600,
+                fontSize: 20,
+                lineHeight: "26px",
+                letterSpacing: "-0.3px",
+                color: C.text,
+              }}
+            >
+              Delete your account
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={close}
+            disabled={deleting}
+            aria-label="Close"
+            style={{
+              flexShrink: 0,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              width: 32,
+              height: 32,
+              borderRadius: 8,
+              border: "none",
+              background: "transparent",
+              cursor: deleting ? "default" : "pointer",
+              color: C.muted,
+            }}
+          >
+            <Icons name="x" size={18} />
+          </button>
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <p style={{ margin: 0, fontFamily: BODY, fontSize: 14, lineHeight: "20px", color: C.secondary }}>
+            This permanently deletes your account and everything in it. I can&apos;t undo this.
+          </p>
+          <ul style={{ margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 4 }}>
+            {["Your account and sign in", "All your businesses and their data", "All connected tools (GitHub and Search Console)"].map(
+              (item) => (
+                <li key={item} style={{ fontFamily: BODY, fontSize: 14, lineHeight: "20px", color: C.secondary }}>
+                  {item}
+                </li>
+              ),
+            )}
+          </ul>
+          <p style={{ margin: 0, fontFamily: BODY, fontSize: 14, lineHeight: "20px", color: C.bad }}>
+            Once it&apos;s done, it&apos;s gone for good.
+          </p>
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <label htmlFor={titleId + "-email"} style={{ fontFamily: BODY, fontSize: 13, lineHeight: "18px", color: C.text }}>
+            Type {email} to confirm
+          </label>
+          <input
+            ref={inputRef}
+            id={titleId + "-email"}
+            type="email"
+            value={typed}
+            onChange={(e) => setTyped(e.target.value)}
+            onFocus={() => setFocused(true)}
+            onBlur={() => setFocused(false)}
+            disabled={deleting}
+            autoComplete="off"
+            autoCapitalize="none"
+            spellCheck={false}
+            placeholder={email}
+            aria-invalid={error ? true : undefined}
+            aria-describedby={error ? titleId + "-err" : undefined}
+            style={{
+              boxSizing: "border-box",
+              width: "100%",
+              padding: "10px 12px",
+              borderRadius: 10,
+              border: "1px solid " + inputTone,
+              background: C.bg,
+              color: C.text,
+              fontFamily: BODY,
+              fontSize: 14,
+              lineHeight: "20px",
+              outline: "none",
+            }}
+          />
+          {error && (
+            <span
+              id={titleId + "-err"}
+              style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: BODY, fontSize: 13, lineHeight: "18px", color: C.bad }}
+            >
+              <Icons name="alert-circle" size={14} />
+              {error}
+            </span>
+          )}
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            flexDirection: m ? "column-reverse" : "row",
+            justifyContent: "flex-end",
+            gap: 10,
+            marginTop: 2,
+          }}
+        >
+          <button
+            type="button"
+            onClick={close}
+            disabled={deleting}
+            style={{
+              boxSizing: "border-box",
+              padding: "10px 16px",
+              borderRadius: m ? 999 : 10,
+              width: m ? "100%" : undefined,
+              border: "1px solid " + C.border,
+              background: "transparent",
+              color: C.text,
+              fontFamily: BODY,
+              fontSize: 14,
+              lineHeight: "20px",
+              cursor: deleting ? "default" : "pointer",
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => void onConfirm()}
+            disabled={!matches || deleting}
+            style={{
+              boxSizing: "border-box",
+              padding: "10px 16px",
+              borderRadius: m ? 999 : 10,
+              width: m ? "100%" : undefined,
+              border: "none",
+              background: C.bad,
+              color: C.onPrimary,
+              fontFamily: BODY,
+              fontSize: 14,
+              fontWeight: 600,
+              lineHeight: "20px",
+              cursor: !matches || deleting ? "default" : "pointer",
+              opacity: !matches || deleting ? 0.5 : 1,
+            }}
+          >
+            {deleting ? "Deleting…" : "Delete account"}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -518,6 +889,18 @@ function LogoutGlyph() {
       <path d="M15 4h3a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1h-3" />
       <path d="M10 8l-4 4l4 4" />
       <path d="M6 12h11" />
+    </svg>
+  );
+}
+
+/** Trash glyph (no delete icon in the registry) for the collapsed rail's delete-account control. */
+function DeleteGlyph() {
+  return (
+    <svg width={18} height={18} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M4 7h16" />
+      <path d="M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13" />
+      <path d="M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3" />
+      <path d="M10 11v6M14 11v6" />
     </svg>
   );
 }
