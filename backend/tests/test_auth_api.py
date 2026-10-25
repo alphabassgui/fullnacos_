@@ -606,3 +606,285 @@ def test_login_required_rejects_empty_set(fake_firebase, flask_app):
 
     resp = _run_guarded(flask_app, "u1", "anything")
     assert getattr(resp, "status_code", None) == 302
+
+
+# ──────────────────────────────────────────────
+# DELETE /api/auth/account — hard account deletion
+#
+# These need a richer fake Firestore than AuthDb above: nested subcollections,
+# db.recursive_delete(ref), and .document(id).delete(). Modeled on the CrudDb
+# fake in test_user_routes.py.
+# ──────────────────────────────────────────────
+
+import itertools as _itertools
+
+
+class DelSnapshot:
+    def __init__(self, data, doc_id):
+        self.exists = data is not None
+        self._data = dict(data) if data else {}
+        self.id = doc_id
+
+    def to_dict(self):
+        return dict(self._data)
+
+
+class DelQuery:
+    """Supports chained .where(...).stream() with == filters."""
+
+    def __init__(self, db, parent_path, filters):
+        self._db = db
+        self._parent_path = tuple(parent_path)
+        self._filters = list(filters)
+
+    def where(self, *args, **kwargs):
+        if kwargs.get("filter") is not None:
+            f = kwargs["filter"]
+            field, op, value = f.field_path, f.op_string, f.value
+        else:
+            field, op, value = args[:3]
+        return DelQuery(self._db, self._parent_path, self._filters + [(field, op, value)])
+
+    def stream(self):
+        out = []
+        for path, data in self._db._store.items():
+            if len(path) != len(self._parent_path) + 1:
+                continue
+            if path[: len(self._parent_path)] != self._parent_path:
+                continue
+            if all(op == "==" and data.get(field) == value
+                   for field, op, value in self._filters):
+                out.append(DelSnapshot(data, path[-1]))
+        return iter(out)
+
+
+class DelRef:
+    def __init__(self, db, path):
+        self._db = db
+        self.path = tuple(path)
+        self.id = self.path[-1]
+
+    def get(self):
+        return DelSnapshot(self._db._store.get(self.path), self.id)
+
+    def set(self, data):
+        self._db._store[self.path] = dict(data)
+
+    def delete(self):
+        self._db._store.pop(self.path, None)
+
+    def collection(self, name):
+        return DelCollection(self._db, self.path + (name,))
+
+
+class DelCollection:
+    def __init__(self, db, path):
+        self._db = db
+        self.path = tuple(path)
+
+    def document(self, doc_id=None):
+        if doc_id is None:
+            doc_id = f"auto-{next(self._db._ids)}"
+        return DelRef(self._db, self.path + (doc_id,))
+
+    def where(self, *args, **kwargs):
+        return DelQuery(self._db, self.path, []).where(*args, **kwargs)
+
+    def stream(self):
+        return DelQuery(self._db, self.path, []).stream()
+
+
+class DelDb:
+    def __init__(self):
+        self._store = {}
+        self._ids = _itertools.count(1)
+
+    def collection(self, name):
+        return DelCollection(self, (name,))
+
+    def recursive_delete(self, ref):
+        prefix = tuple(ref.path)
+        for path in [p for p in self._store if p[: len(prefix)] == prefix]:
+            del self._store[path]
+
+
+@pytest.fixture
+def account_db(monkeypatch):
+    """Rich in-memory Firestore for account-deletion tests, with the best-effort
+    provider/tile helpers stubbed so tests NEVER hit real GitHub/Google/Supabase."""
+    import routes.auth_api as auth_api
+
+    db = DelDb()
+    monkeypatch.setattr(auth_api, "db", db)
+    # Defaults: no provider connections, revocation/tile cleanup are no-ops.
+    monkeypatch.setattr(auth_api.connection_service, "get_connection", lambda *a, **k: None)
+    monkeypatch.setattr(auth_api.connection_service, "revoke_github_token", lambda *a, **k: True)
+    monkeypatch.setattr(auth_api.connection_service, "revoke_google_token", lambda *a, **k: True)
+    monkeypatch.setattr(auth_api.tile_storage_service, "delete_tiles_for_business", lambda *a, **k: None)
+    return db, auth_api
+
+
+def _seed_account(db, user_id="u1", email="alice@example.com"):
+    """Seed a user with a business (several subcollections), a student_profile,
+    and a security_logs entry — the full footprint account deletion must clear."""
+    db._store[("users", user_id)] = {
+        "username": "Alice", "email": email, "role": "user", "status": "Active",
+    }
+    biz = ("businesses", f"{user_id}-b1")
+    db._store[biz] = {"owner_id": user_id, "name": "Ada's Bakery"}
+    db._store[biz + ("opportunities", "opp1")] = {"owner_id": user_id}
+    db._store[biz + ("opportunities", "opp2")] = {"owner_id": user_id}
+    db._store[biz + ("actions", "act1")] = {"owner_id": user_id}
+    db._store[biz + ("connections", "con1")] = {"owner_id": user_id, "provider": "github"}
+    db._store[biz + ("gtm_runs", "gtm1")] = {"owner_id": user_id}
+    db._store[("student_profiles", user_id)] = {"bio": "hi"}
+    db._store[("security_logs", f"{user_id}-log1")] = {
+        "user_id": user_id, "type": "device_mismatch",
+    }
+
+
+def _login(client, user_id):
+    with client.session_transaction() as sess:
+        sess["user_id"] = user_id
+
+
+def test_delete_account_hard_deletes_everything(account_db, client):
+    db, auth_api = account_db
+    _seed_account(db, "u1", "alice@example.com")
+    _login(client, "u1")
+
+    # Confirmation is re-verified case-insensitively (stored email is lowercased).
+    resp = client.delete("/api/auth/account", json={"confirm_email": "Alice@Example.com"})
+    assert resp.status_code == 200
+    assert resp.get_json() == {"success": True, "message": "Account deleted"}
+
+    # User doc, every business doc + subcollection doc, student_profile, and the
+    # user's security_logs are all gone.
+    assert ("users", "u1") not in db._store
+    assert [p for p in db._store if p[:2] == ("businesses", "u1-b1")] == []
+    assert ("student_profiles", "u1") not in db._store
+    assert ("security_logs", "u1-log1") not in db._store
+    # Session dropped.
+    with client.session_transaction() as sess:
+        assert "user_id" not in sess
+
+
+def test_delete_account_isolates_other_users(account_db, client):
+    db, auth_api = account_db
+    _seed_account(db, "u1", "alice@example.com")
+    _seed_account(db, "u2", "bob@example.com")
+    _login(client, "u1")
+
+    resp = client.delete("/api/auth/account", json={"confirm_email": "alice@example.com"})
+    assert resp.status_code == 200
+
+    # Everything belonging to u2 is untouched.
+    assert ("users", "u2") in db._store
+    assert ("businesses", "u2-b1") in db._store
+    assert ("businesses", "u2-b1", "opportunities", "opp1") in db._store
+    assert ("student_profiles", "u2") in db._store
+    assert ("security_logs", "u2-log1") in db._store
+
+
+def test_delete_account_revokes_and_cleans_tiles_when_connected(account_db, client):
+    # When a business has connected providers, the revoke helpers and tile
+    # cleanup are invoked (best-effort) before the Firestore cascade.
+    db, auth_api = account_db
+    _seed_account(db, "u1", "alice@example.com")
+    _login(client, "u1")
+
+    gh_calls, goog_calls, tile_calls = [], [], []
+    conn = {"access_token": "gh-access", "refresh_token": "goog-refresh"}
+    auth_api.connection_service.get_connection = lambda *a, **k: dict(conn)
+    auth_api.connection_service.revoke_github_token = lambda t: gh_calls.append(t) or True
+    auth_api.connection_service.revoke_google_token = lambda t: goog_calls.append(t) or True
+    auth_api.tile_storage_service.delete_tiles_for_business = lambda b: tile_calls.append(b)
+
+    resp = client.delete("/api/auth/account", json={"confirm_email": "alice@example.com"})
+    assert resp.status_code == 200
+    assert gh_calls == ["gh-access"]
+    assert goog_calls == ["goog-refresh"]  # refresh token preferred
+    assert tile_calls == ["u1-b1"]
+    assert ("users", "u1") not in db._store
+
+
+def test_delete_account_best_effort_failures_still_delete(account_db, client):
+    # Even if the revoke helpers AND the tile helper RAISE, the hard delete must
+    # still complete and return 200.
+    db, auth_api = account_db
+    _seed_account(db, "u1", "alice@example.com")
+    _login(client, "u1")
+
+    def boom(*a, **k):
+        raise RuntimeError("provider down")
+
+    auth_api.connection_service.get_connection = lambda *a, **k: {
+        "access_token": "x", "refresh_token": "y",
+    }
+    auth_api.connection_service.revoke_github_token = boom
+    auth_api.connection_service.revoke_google_token = boom
+    auth_api.tile_storage_service.delete_tiles_for_business = boom
+
+    resp = client.delete("/api/auth/account", json={"confirm_email": "alice@example.com"})
+    assert resp.status_code == 200
+    assert resp.get_json()["success"] is True
+    assert ("users", "u1") not in db._store
+    assert [p for p in db._store if p[:2] == ("businesses", "u1-b1")] == []
+    assert ("security_logs", "u1-log1") not in db._store
+
+
+def test_delete_account_wrong_email_400_nothing_deleted(account_db, client):
+    db, auth_api = account_db
+    _seed_account(db, "u1", "alice@example.com")
+    before = dict(db._store)
+    _login(client, "u1")
+
+    resp = client.delete("/api/auth/account", json={"confirm_email": "wrong@example.com"})
+    assert resp.status_code == 400
+    assert resp.get_json() == {"success": False, "error": "Email confirmation does not match"}
+    assert db._store == before
+
+
+def test_delete_account_missing_email_400_nothing_deleted(account_db, client):
+    db, auth_api = account_db
+    _seed_account(db, "u1", "alice@example.com")
+    before = dict(db._store)
+    _login(client, "u1")
+
+    resp = client.delete("/api/auth/account", json={})
+    assert resp.status_code == 400
+    assert resp.get_json() == {"success": False, "error": "Email confirmation does not match"}
+    assert db._store == before
+
+
+def test_delete_account_unauthenticated_401(account_db, client):
+    db, auth_api = account_db
+    _seed_account(db, "u1", "alice@example.com")
+    before = dict(db._store)
+    with client.session_transaction() as sess:
+        sess.clear()
+
+    resp = client.delete("/api/auth/account", json={"confirm_email": "alice@example.com"})
+    assert resp.status_code == 401
+    assert resp.get_json() == {"success": False, "error": "Authentication required"}
+    assert db._store == before
+
+
+def test_delete_account_missing_user_doc_404(account_db, client):
+    db, auth_api = account_db
+    _login(client, "ghost")
+
+    resp = client.delete("/api/auth/account", json={"confirm_email": "alice@example.com"})
+    assert resp.status_code == 404
+    assert resp.get_json() == {"success": False, "error": "User not found"}
+    with client.session_transaction() as sess:
+        assert "user_id" not in sess
+
+
+def test_delete_account_route_registered(flask_app):
+    rule = next(
+        (r for r in flask_app.url_map.iter_rules() if r.rule == "/api/auth/account"),
+        None,
+    )
+    assert rule is not None
+    assert "DELETE" in rule.methods
