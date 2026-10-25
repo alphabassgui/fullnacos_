@@ -101,6 +101,36 @@ def create_business():
         "updated_at": now,
     }
 
+    # ─────────────────────────────────────────────────────────
+    # Duplicate-business guard
+    #
+    # Only dedupe when a website_url is present. website_url is the
+    # NORMALIZED value from validate_website_url above (never the raw
+    # input). A name-only business (blank website_url) can be created
+    # legitimately during onboarding, so it is never blocked, and we
+    # never dedupe on name.
+    # ─────────────────────────────────────────────────────────
+
+    if website_url:
+        existing = (
+            db.collection("businesses")
+            .where(filter=FieldFilter("owner_id", "==", user_id))
+            .where(filter=FieldFilter("website_url", "==", website_url))
+            .stream()
+        )
+
+        for existing_doc in existing:
+            existing_data = existing_doc.to_dict()
+            return jsonify({
+                "success": False,
+                "error": "You already have a business with this website.",
+                "existing_business": {
+                    "id": existing_doc.id,
+                    "name": existing_data.get("name"),
+                    "website_url": existing_data.get("website_url"),
+                },
+            }), 409
+
     business_ref = db.collection("businesses").document()
     business_ref.set(business_data)
 
@@ -272,10 +302,21 @@ def delete_business(business_id):
         }), 403
 
     # ─────────────────────────────────────────────────────────
-    # Delete business
+    # Delete business (cascade)
+    #
+    # Firestore does NOT delete subcollections when a parent doc is
+    # deleted, so a plain .delete() orphans every owned subcollection
+    # (opportunities, actions, executions, measurements, learnings,
+    # connections, gtm_runs, agent_runs, observations, and any others).
+    # google-cloud-firestore 2.30.0 provides recursive_delete, which
+    # removes the doc plus every nested subcollection.
     # ─────────────────────────────────────────────────────────
 
-    business_ref.delete()
+    db.recursive_delete(business_ref)
+
+    # TODO: Supabase tile blobs for this business's gtm_runs are stored
+    # outside Firestore and are NOT removed by this cascade — that belongs
+    # to the #5 account-deletion phase.
 
     return jsonify({
         "success": True,
