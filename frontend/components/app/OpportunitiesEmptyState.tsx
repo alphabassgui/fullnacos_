@@ -270,6 +270,20 @@ function AddWebsiteModal({
       if (id == null) {
         const created = await createBusiness({ name: nameFromDomain(host), website_url: websiteUrl });
         if (!created.ok) {
+          if (created.status === 409) {
+            const existing =
+              created.data && typeof created.data === "object"
+                ? (created.data as { existing_business?: { name?: unknown } }).existing_business
+                : null;
+            const existingName = existing && typeof existing.name === "string" ? existing.name.trim() : "";
+            setError(
+              existingName
+                ? `You already have a business (${existingName}) with this website. Go to Connections to delete or edit it, then retry.`
+                : "You already have a business with this website. Go to Connections to delete or edit it, then retry.",
+            );
+            setBusy(false);
+            return;
+          }
           setError(created.status === 400 ? "I couldn't read that domain. Check it and try again." : "Something went wrong saving your site. Give it another try.");
           setBusy(false);
           return;

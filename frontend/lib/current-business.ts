@@ -33,3 +33,16 @@ export function setCurrentBusinessId(id: string): void {
     // Storage unavailable (private mode, quota, blocked) — the list-on-load still resolves current.
   }
 }
+
+/**
+ * Forget the remembered current business id (e.g. after deleting the business). Best-effort —
+ * a storage failure is swallowed, same guard as the setter.
+ */
+export function clearCurrentBusinessId(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(KEY);
+  } catch {
+    // Storage unavailable — nothing cached to clear.
+  }
+}

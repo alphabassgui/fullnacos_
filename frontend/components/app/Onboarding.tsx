@@ -398,6 +398,16 @@ function createErrorMessage(status: number, data: unknown): string {
       ? (data as { error: string }).error
       : null;
   if (status === 401) return "Your session has expired. Please log in again.";
+  if (status === 409) {
+    const existing =
+      data && typeof data === "object"
+        ? (data as { existing_business?: { name?: unknown } }).existing_business
+        : null;
+    const name = existing && typeof existing.name === "string" ? existing.name.trim() : "";
+    return name
+      ? `You already have a business (${name}) with this website. Open Connections to delete or edit it, then try again.`
+      : "You already have a business with this website. Open Connections to delete or edit it, then try again.";
+  }
   if (serverMsg) return serverMsg;
   if (status === 400) return "Please check your details and try again.";
   return "Something went wrong creating your business. Please try again.";
