@@ -1,6 +1,16 @@
+import logging
+import os
 from datetime import datetime
+
+import requests
+
 from services.token_encryption import encrypt_token, decrypt_token
 from firebase import db
+
+logger = logging.getLogger(__name__)
+
+# Short timeout so a slow/unreachable provider never stalls account deletion.
+_REVOKE_TIMEOUT_SECONDS = 10
 
 
 def create_connection(
@@ -217,8 +227,10 @@ def delete_connection(
     deleted = 0
 
     for connection_doc in connections:
-        # TODO: GitHub-side OAuth token revocation can be added here later.
-        # The MVP only removes the stored Firestore connection doc.
+        # Provider-side OAuth token revocation is handled separately by the
+        # best-effort revoke_github_token / revoke_google_token helpers below
+        # (called from the account-deletion flow). Here we only remove the
+        # stored Firestore connection doc.
         connection_doc.reference.delete()
         deleted += 1
 
@@ -250,3 +262,86 @@ def create_github_connection(
             **connection_data,
         },
     )
+
+
+def revoke_github_token(access_token):
+    """Best-effort revocation of a GitHub OAuth access token, provider-side.
+
+    Calls GitHub's "Delete an app token" endpoint
+    (DELETE /applications/<client_id>/token) with HTTP Basic auth using the
+    OAuth app's client id and secret, and the token to revoke in the JSON body.
+    See https://docs.github.com/rest/apps/oauth-applications (returns 204 on
+    success).
+
+    This is strictly best-effort: a missing env var or token, or any failure,
+    returns False and is logged. It NEVER raises — account deletion must still
+    remove the stored Firestore data even when the provider call fails.
+
+    Returns True only when the provider confirmed revocation (2xx).
+    """
+    if not access_token:
+        return False
+
+    client_id = os.environ.get("GITHUB_CLIENT_ID")
+    client_secret = os.environ.get("GITHUB_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        # OAuth app not configured in this environment → nothing we can revoke.
+        return False
+
+    try:
+        resp = requests.delete(
+            f"https://api.github.com/applications/{client_id}/token",
+            auth=(client_id, client_secret),
+            json={"access_token": access_token},
+            headers={"Accept": "application/vnd.github+json"},
+            timeout=_REVOKE_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        # Timeout, DNS, connection reset, etc. Log WITHOUT the token.
+        logger.warning("GitHub token revocation request failed: %s", exc)
+        return False
+
+    if 200 <= resp.status_code < 300:
+        return True
+
+    logger.warning(
+        "GitHub token revocation returned HTTP %s", resp.status_code
+    )
+    return False
+
+
+def revoke_google_token(token):
+    """Best-effort revocation of a Google OAuth token, provider-side.
+
+    Calls Google's revocation endpoint (POST https://oauth2.googleapis.com/revoke)
+    with the token as a form-urlencoded ``token`` parameter. See
+    https://developers.google.com/identity/protocols/oauth2/web-server#tokenrevoke.
+    Callers should pass the refresh_token when present (revoking it also revokes
+    derived access tokens), otherwise the access_token.
+
+    This is strictly best-effort: a missing token or any failure returns False
+    and is logged. It NEVER raises.
+
+    Returns True only when the provider confirmed revocation (2xx).
+    """
+    if not token:
+        return False
+
+    try:
+        resp = requests.post(
+            "https://oauth2.googleapis.com/revoke",
+            data={"token": token},
+            timeout=_REVOKE_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        # Timeout, DNS, connection reset, etc. Log WITHOUT the token.
+        logger.warning("Google token revocation request failed: %s", exc)
+        return False
+
+    if 200 <= resp.status_code < 300:
+        return True
+
+    logger.warning(
+        "Google token revocation returned HTTP %s", resp.status_code
+    )
+    return False

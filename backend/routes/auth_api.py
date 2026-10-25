@@ -6,9 +6,17 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 from werkzeug.security import check_password_hash, generate_password_hash
 
 import routes.auth as auth
+import services.connection_service as connection_service
+import services.tile_storage_service as tile_storage_service
 from firebase import db
 
 api_auth_bp = Blueprint("api_auth", __name__)
+
+# Providers whose OAuth tokens we revoke provider-side during account deletion,
+# mapped to the connection_service helper that revokes each. Revocation is
+# strictly best-effort; the stored (encrypted) Firestore docs are removed by the
+# per-business recursive_delete regardless.
+_OAUTH_PROVIDERS = ("github", "google_search_console")
 
 
 def _has_onboarding_evidence(user_id):
@@ -252,4 +260,114 @@ def api_onboarding_complete():
         return jsonify({"success": True}), 200
     except Exception as exc:
         current_app.logger.error(f"API onboarding complete error: {exc}")
+        return jsonify({"success": False, "error": "Internal server error."}), 500
+
+
+def _revoke_business_tokens(business_id, user_id):
+    """Best-effort provider-side OAuth revocation for one business.
+
+    For each connected provider, fetch the decrypted token(s) and ask the
+    provider to revoke them. Every step is wrapped so a failure (a provider
+    outage, a missing/foreign connection, a helper raising) can NEVER abort the
+    account deletion — the stored Firestore connection docs are removed by the
+    caller's recursive_delete regardless of what happens here."""
+    for provider in _OAUTH_PROVIDERS:
+        try:
+            conn = connection_service.get_connection(business_id, user_id, provider)
+            if not conn:
+                continue
+            if provider == "github":
+                connection_service.revoke_github_token(conn.get("access_token"))
+            else:
+                # Prefer the refresh token (revoking it also kills derived
+                # access tokens); fall back to the access token.
+                connection_service.revoke_google_token(
+                    conn.get("refresh_token") or conn.get("access_token")
+                )
+        except Exception as exc:  # pragma: no cover - defensive only
+            current_app.logger.warning(
+                f"Token revocation skipped for business {business_id} "
+                f"provider {provider}: {exc}"
+            )
+
+
+@api_auth_bp.route("/api/auth/account", methods=["DELETE"])
+def api_delete_account():
+    """Permanently and irreversibly delete the signed-in user's account.
+
+    HARD delete: the user doc, every business they own (plus all nested
+    subcollections, via recursive_delete), their student_profiles doc, and all
+    of their security_logs entries are removed. Additionally, GitHub and Google
+    Search Console OAuth tokens are revoked provider-side and the business's
+    Supabase tile blobs are cleaned up — both strictly best-effort, so neither a
+    provider outage nor a storage hiccup can block the deletion or change the
+    200 response.
+
+    Because deletion is irreversible, it requires a server-side confirmation:
+    the caller must send their own account email in ``confirm_email`` and this
+    endpoint re-verifies it against the stored (lowercased) email before
+    deleting anything. This guards the (separate) frontend typed-email step and
+    is never skipped."""
+    try:
+        user_id = session.get("user_id")
+        if not user_id:
+            return jsonify({"success": False, "error": "Authentication required"}), 401
+
+        user_ref = db.collection("users").document(user_id)
+        user_doc = user_ref.get()
+        if not user_doc.exists:
+            session.clear()
+            return jsonify({"success": False, "error": "User not found"}), 404
+
+        # ── Irreversibility gate: re-verify the typed email server-side ──
+        data = request.get_json(silent=True) or {}
+        confirm_email = (data.get("confirm_email") or "").strip().lower()
+        stored_email = (user_doc.to_dict() or {}).get("email")
+        if not confirm_email or confirm_email != stored_email:
+            return jsonify({
+                "success": False,
+                "error": "Email confirmation does not match",
+            }), 400
+
+        # ── Enumerate the user's businesses up front ──
+        business_ids = [
+            business.id
+            for business in db.collection("businesses")
+            .where(filter=FieldFilter("owner_id", "==", user_id))
+            .stream()
+        ]
+
+        # ── Per business: best-effort provider revocation + tile cleanup,
+        #    then a recursive delete of the business and all subcollections ──
+        for business_id in business_ids:
+            _revoke_business_tokens(business_id, user_id)
+            try:
+                tile_storage_service.delete_tiles_for_business(business_id)
+            except Exception as exc:  # pragma: no cover - defensive only
+                current_app.logger.warning(
+                    f"Tile cleanup skipped for business {business_id}: {exc}"
+                )
+            db.recursive_delete(db.collection("businesses").document(business_id))
+
+        # ── Per-user student profile (may not exist) ──
+        profile_ref = db.collection("student_profiles").document(user_id)
+        if profile_ref.get().exists:
+            profile_ref.delete()
+
+        # ── The user's own security_logs entries (top-level, not cascaded) ──
+        security_logs = (
+            db.collection("security_logs")
+            .where(filter=FieldFilter("user_id", "==", user_id))
+            .stream()
+        )
+        for log_doc in security_logs:
+            db.collection("security_logs").document(log_doc.id).delete()
+
+        # ── Finally the user doc itself, then drop the session ──
+        user_ref.delete()
+        session.clear()
+
+        return jsonify({"success": True, "message": "Account deleted"}), 200
+    except Exception as exc:
+        current_app.logger.error(f"API delete account error: {exc}")
         return jsonify({"success": False, "error": "Internal server error."}), 500
