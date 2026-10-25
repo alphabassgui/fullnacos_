@@ -225,6 +225,17 @@ export function deleteBusiness(id: string): Promise<ApiResult> {
   return apiFetch(`/api/business/${id}`, { method: "DELETE" });
 }
 
+/**
+ * DELETE /api/auth/account with body {confirm_email} → 200 {success:true} on hard delete (the
+ * server also clears the session), 400 {success:false, error} if confirm_email doesn't match the
+ * account email, 401 if unauthenticated. The backend re-verifies the email; the typed-email step
+ * in the UI is the user-facing guard on top. Returns the raw ApiResult so the caller can branch on
+ * status (400 mismatch / 401 signed-out / 200 done) and surface errors inline.
+ */
+export function deleteAccount(confirmEmail: string): Promise<ApiResult> {
+  return apiFetch("/api/auth/account", { method: "DELETE", body: JSON.stringify({ confirm_email: confirmEmail }) });
+}
+
 /* ── Analyze pipeline ─────────────────────────────────────────────────────
  * The pipeline is ASYNC (Celery): trigger → poll. `analyzeBusiness` kicks off a
  * run; `getLatestRun` is polled until the run finishes; `getOpportunities`
