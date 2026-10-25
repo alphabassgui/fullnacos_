@@ -286,3 +286,272 @@ def test_get_latest_run_returns_full_run_from_completed(client, seeded, monkeypa
         "opportunity_ids": ["opp1"], "error": None,
         "created_at": "2026-09-16T00:00:00", "completed_at": "2026-09-16T00:00:01",
     }
+
+
+# ─────────────────────────────────────────────────────────────
+# create_business (POST /api/business) + delete_business
+# (DELETE /api/business/<id>) — dedupe guard + cascade delete.
+#
+# These need a fake Firestore that supports chained .where().where(),
+# auto-id .document(), .delete(), and db.recursive_delete(ref) over
+# nested subcollections, which the fakes above do not provide.
+# ─────────────────────────────────────────────────────────────
+
+import itertools
+
+
+class CrudSnapshot:
+    def __init__(self, data, doc_id):
+        self.exists = data is not None
+        self._data = dict(data) if data else {}
+        self.id = doc_id
+
+    def to_dict(self):
+        return dict(self._data)
+
+
+class CrudQuery:
+    """Supports chained .where(...).where(...).stream()."""
+
+    def __init__(self, db, parent_path, filters):
+        self._db = db
+        self._parent_path = tuple(parent_path)
+        self._filters = list(filters)
+
+    def where(self, *args, **kwargs):
+        if kwargs.get("filter") is not None:
+            f = kwargs["filter"]
+            field, op, value = f.field_path, f.op_string, f.value
+        else:
+            field, op, value = args[:3]
+        return CrudQuery(self._db, self._parent_path, self._filters + [(field, op, value)])
+
+    def stream(self):
+        out = []
+        for path, data in self._db._store.items():
+            if len(path) != len(self._parent_path) + 1:
+                continue
+            if path[: len(self._parent_path)] != self._parent_path:
+                continue
+            if all(op == "==" and data.get(field) == value
+                   for field, op, value in self._filters):
+                out.append(CrudSnapshot(data, path[-1]))
+        return iter(out)
+
+
+class CrudRef:
+    def __init__(self, db, path):
+        self._db = db
+        self.path = tuple(path)
+        self.id = self.path[-1]
+
+    def get(self):
+        return CrudSnapshot(self._db._store.get(self.path), self.id)
+
+    def set(self, data):
+        self._db._store[self.path] = dict(data)
+
+    def delete(self):
+        self._db._store.pop(self.path, None)
+
+    def collection(self, name):
+        return CrudCollection(self._db, self.path + (name,))
+
+
+class CrudCollection:
+    def __init__(self, db, path):
+        self._db = db
+        self.path = tuple(path)
+
+    def document(self, doc_id=None):
+        if doc_id is None:
+            doc_id = f"auto-{next(self._db._ids)}"
+        return CrudRef(self._db, self.path + (doc_id,))
+
+    def where(self, *args, **kwargs):
+        return CrudQuery(self._db, self.path, []).where(*args, **kwargs)
+
+    def stream(self):
+        return CrudQuery(self._db, self.path, []).stream()
+
+
+class CrudDb:
+    def __init__(self):
+        self._store = {}
+        self._ids = itertools.count(1)
+
+    def collection(self, name):
+        return CrudCollection(self, (name,))
+
+    def recursive_delete(self, ref):
+        prefix = tuple(ref.path)
+        for path in [p for p in self._store if p[: len(prefix)] == prefix]:
+            del self._store[path]
+
+
+@pytest.fixture
+def crud_db(monkeypatch):
+    import routes.user as routes_user
+
+    db = CrudDb()
+    monkeypatch.setattr(routes_user, "db", db)
+    return db
+
+
+def _login(client, user_id="u1"):
+    with client.session_transaction() as sess:
+        sess["user_id"] = user_id
+
+
+def _count_businesses(db):
+    return sum(1 for path in db._store if len(path) == 2 and path[0] == "businesses")
+
+
+# ---- create_business: dedupe guard ----
+
+def test_create_first_business_returns_201(crud_db, client):
+    _login(client)
+    resp = client.post("/api/business", json={
+        "name": "Acme", "website_url": "https://acme.example",
+    })
+    assert resp.status_code == 201
+    assert resp.get_json()["success"] is True
+    assert _count_businesses(crud_db) == 1
+
+
+def test_create_duplicate_website_returns_409_and_no_second_doc(crud_db, client):
+    _login(client)
+    first = client.post("/api/business", json={
+        "name": "Acme", "website_url": "https://acme.example",
+    })
+    assert first.status_code == 201
+    first_id = first.get_json()["business"]["id"]
+
+    dup = client.post("/api/business", json={
+        "name": "Acme Again", "website_url": "https://acme.example",
+    })
+    assert dup.status_code == 409
+    body = dup.get_json()
+    assert body["success"] is False
+    assert body["error"] == "You already have a business with this website."
+    assert body["existing_business"]["id"] == first_id
+    # No second business doc was created.
+    assert _count_businesses(crud_db) == 1
+
+
+def test_create_different_website_same_owner_returns_201(crud_db, client):
+    _login(client)
+    client.post("/api/business", json={
+        "name": "Acme", "website_url": "https://acme.example",
+    })
+    resp = client.post("/api/business", json={
+        "name": "Beta", "website_url": "https://beta.example",
+    })
+    assert resp.status_code == 201
+    assert _count_businesses(crud_db) == 2
+
+
+def test_create_name_only_not_blocked_even_repeated(crud_db, client):
+    _login(client)
+    first = client.post("/api/business", json={"name": "No Site Co"})
+    assert first.status_code == 201
+    second = client.post("/api/business", json={"name": "No Site Co"})
+    assert second.status_code == 201
+    assert _count_businesses(crud_db) == 2
+
+
+def test_create_same_website_different_owner_not_blocked(crud_db, client):
+    _login(client, "u1")
+    client.post("/api/business", json={
+        "name": "Acme", "website_url": "https://acme.example",
+    })
+    _login(client, "u2")
+    resp = client.post("/api/business", json={
+        "name": "Acme Clone", "website_url": "https://acme.example",
+    })
+    assert resp.status_code == 201
+    assert _count_businesses(crud_db) == 2
+
+
+def test_create_unrelated_leaves_preexisting_business_untouched(crud_db, client):
+    # A user who already has one business (seeded directly, not via the route)
+    # creating an unrelated business is not blocked and keeps the original.
+    crud_db._store[("businesses", "existing")] = {
+        "owner_id": "u1", "name": "Original", "website_url": "https://original.example",
+    }
+    _login(client)
+    resp = client.post("/api/business", json={
+        "name": "New One", "website_url": "https://new.example",
+    })
+    assert resp.status_code == 201
+    assert _count_businesses(crud_db) == 2
+    assert crud_db._store[("businesses", "existing")] == {
+        "owner_id": "u1", "name": "Original", "website_url": "https://original.example",
+    }
+
+
+def test_create_unauthenticated_401(crud_db, client):
+    with client.session_transaction() as sess:
+        sess.clear()
+    resp = client.post("/api/business", json={"name": "Acme"})
+    assert resp.status_code == 401
+    assert _count_businesses(crud_db) == 0
+
+
+def test_create_missing_name_400(crud_db, client):
+    _login(client)
+    resp = client.post("/api/business", json={"website_url": "https://acme.example"})
+    assert resp.status_code == 400
+    assert _count_businesses(crud_db) == 0
+
+
+# ---- delete_business: cascade ----
+
+def _seed_business_with_subcollections(db, biz_id="b1", owner="u1"):
+    db._store[("businesses", biz_id)] = {
+        "owner_id": owner, "name": "Acme", "website_url": "https://acme.example",
+    }
+    db._store[("businesses", biz_id, "opportunities", "opp1")] = {"owner_id": owner}
+    db._store[("businesses", biz_id, "opportunities", "opp2")] = {"owner_id": owner}
+    db._store[("businesses", biz_id, "actions", "act1")] = {"owner_id": owner}
+    db._store[("businesses", biz_id, "connections", "con1")] = {"owner_id": owner}
+    db._store[("businesses", biz_id, "gtm_runs", "gtm1")] = {"owner_id": owner}
+
+
+def test_delete_cascades_subcollections(crud_db, client):
+    _seed_business_with_subcollections(crud_db)
+    _login(client, "u1")
+
+    resp = client.delete("/api/business/b1")
+    assert resp.status_code == 200
+    assert resp.get_json()["success"] is True
+
+    # Business doc AND every subcollection doc are gone.
+    remaining = [p for p in crud_db._store if p[:2] == ("businesses", "b1")]
+    assert remaining == []
+
+
+def test_delete_non_owner_403_nothing_deleted(crud_db, client):
+    _seed_business_with_subcollections(crud_db, owner="u2")
+    before = dict(crud_db._store)
+    _login(client, "u1")
+
+    resp = client.delete("/api/business/b1")
+    assert resp.status_code == 403
+    assert crud_db._store == before
+
+
+def test_delete_missing_business_404(crud_db, client):
+    _login(client, "u1")
+    resp = client.delete("/api/business/nope")
+    assert resp.status_code == 404
+
+
+def test_delete_unauthenticated_401(crud_db, client):
+    _seed_business_with_subcollections(crud_db)
+    before = dict(crud_db._store)
+    with client.session_transaction() as sess:
+        sess.clear()
+    resp = client.delete("/api/business/b1")
+    assert resp.status_code == 401
+    assert crud_db._store == before
