@@ -216,6 +216,15 @@ export function updateBusiness(
   return apiFetch(`/api/business/${id}`, { method: "PATCH", body: JSON.stringify(body) });
 }
 
+/**
+ * DELETE /api/business/<id> → 200 {success, business_id}. CASCADE-deletes the business and
+ * all its subcollections. Returns the raw ApiResult so the caller can treat a 404 (already
+ * gone) as success and surface 401 / other errors inline.
+ */
+export function deleteBusiness(id: string): Promise<ApiResult> {
+  return apiFetch(`/api/business/${id}`, { method: "DELETE" });
+}
+
 /* ── Analyze pipeline ─────────────────────────────────────────────────────
  * The pipeline is ASYNC (Celery): trigger → poll. `analyzeBusiness` kicks off a
  * run; `getLatestRun` is polled until the run finishes; `getOpportunities`

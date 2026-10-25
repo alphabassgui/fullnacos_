@@ -9,6 +9,7 @@ import { C, DISPLAY, BODY, MONO_EYEBROW, DashboardShell } from "./shell";
 import { InfoTip } from "@/components/ui/tooltip";
 import { useIsMobile } from "./use-media-query";
 import { useBusiness } from "@/lib/use-business";
+import { clearCurrentBusinessId } from "@/lib/current-business";
 import {
   githubConnect,
   githubRepositories,
@@ -19,6 +20,9 @@ import {
   searchConsoleSelectProperty,
   searchConsoleAnalytics,
   searchConsoleDisconnect,
+  updateBusiness,
+  deleteBusiness,
+  type FlaskBusiness,
   type FlaskGithubRepository,
   type FlaskSearchConsoleProperty,
   type FlaskSearchConsoleRow,
@@ -28,11 +32,12 @@ import {
  * Connections — the GitHub + Google Search Console screen, wired to the real
  * Flask backend.
  *
- * SCOPE: GitHub and Google Search Console (GSC). For GitHub the owner connects
- * their account and picks the repository Groville may read. For GSC the owner
- * connects Search Console, picks the property Groville may read, and sees that
- * property's recent search analytics. GSC is CONNECT + DISPLAY only: no
- * Instagram, no other tools.
+ * SCOPE: the owner's business, GitHub and Google Search Console (GSC). The
+ * business card edits the current business's details and can permanently
+ * (cascade) delete it. For GitHub the owner connects their account and picks the
+ * repository Groville may read. For GSC the owner connects Search Console, picks
+ * the property Groville may read, and sees that property's recent search
+ * analytics. GSC is CONNECT + DISPLAY only: no Instagram, no other tools.
  *
  * Honesty boundary (never break): connecting GitHub only LINKS the account so I
  * can read the code and draft changes. Connecting Search Console only lets me
@@ -1525,6 +1530,267 @@ const SUBHEAD_STYLE: CSSProperties = {
   color: C.text,
 };
 
+/* ── Your business (edit details + cascade delete) ──────────────────────── */
+
+const FIELD_LABEL_STYLE: CSSProperties = {
+  fontFamily: BODY,
+  fontSize: 13,
+  lineHeight: "18px",
+  color: C.secondary,
+};
+
+const FIELD_INPUT_STYLE: CSSProperties = {
+  width: "100%",
+  padding: "11px 14px",
+  borderRadius: 10,
+  background: C.s2,
+  border: "1px solid " + C.border,
+  color: C.text,
+  fontFamily: BODY,
+  fontSize: 15,
+  lineHeight: "20px",
+  outline: "none",
+};
+
+/**
+ * The business card: edit the current business's details and permanently delete it.
+ *
+ * SCOPE: this card ONLY edits details and deletes — it never runs the audit. After a website
+ * change it points to Opportunities (where the audit + polling already live); it does not
+ * reimplement analyze/poll here. Honesty boundary: nothing here sends, publishes or runs on
+ * its own, and delete is confirm-gated (never automatic).
+ */
+function BusinessConnection({ business, showToast }: { business: FlaskBusiness; showToast: ShowToast }) {
+  const m = useIsMobile();
+  const router = useRouter();
+
+  // Baseline = the last-saved values; inputs start from it and the card reflects it after a save.
+  const [baseline, setBaseline] = useState({
+    name: business.name ?? "",
+    website_url: business.website_url ?? "",
+    industry: business.industry ?? "",
+    description: business.description ?? "",
+  });
+  const [name, setName] = useState(baseline.name);
+  const [websiteUrl, setWebsiteUrl] = useState(baseline.website_url);
+  const [industry, setIndustry] = useState(baseline.industry);
+  const [description, setDescription] = useState(baseline.description);
+
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [websiteChangedHint, setWebsiteChangedHint] = useState(false);
+
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  const save = useCallback(async () => {
+    if (saving) return;
+    const next = {
+      name: name.trim(),
+      website_url: websiteUrl.trim(),
+      industry: industry.trim(),
+      description: description.trim(),
+    };
+    if (!next.name) {
+      setFormError("Please enter your business name.");
+      return;
+    }
+    // Only changed, non-empty fields (the backend 400s an empty name / no valid fields).
+    const payload: { name?: string; website_url?: string; industry?: string; description?: string } = {};
+    (Object.keys(next) as (keyof typeof next)[]).forEach((key) => {
+      if (next[key] && next[key] !== baseline[key]) payload[key] = next[key];
+    });
+    if (Object.keys(payload).length === 0) {
+      setFormError("Nothing to update yet.");
+      return;
+    }
+    setFormError(null);
+    setSaving(true);
+    try {
+      const result = await updateBusiness(business.id, payload);
+      if (result.ok) {
+        const websiteChanged = "website_url" in payload;
+        setBaseline((prev) => ({ ...prev, ...payload }));
+        setWebsiteChangedHint(websiteChanged);
+        showToast("success", "Business details updated.");
+      } else if (result.status === 401) {
+        router.replace(LOGIN_HREF);
+        return;
+      } else if (result.status === 400) {
+        const serverMsg =
+          result.data && typeof result.data === "object" && typeof (result.data as { error?: unknown }).error === "string"
+            ? (result.data as { error: string }).error
+            : "Please check your details and try again.";
+        setFormError(serverMsg);
+      } else {
+        showToast("error", "I couldn't save your changes. Give it another try.");
+      }
+    } catch {
+      showToast("error", "I couldn't reach the server. Give it another try.");
+    } finally {
+      setSaving(false);
+    }
+  }, [saving, name, websiteUrl, industry, description, baseline, business.id, router, showToast]);
+
+  const remove = useCallback(async () => {
+    if (deleting) return;
+    setDeleting(true);
+    try {
+      const result = await deleteBusiness(business.id);
+      // 404 (already gone) is as good as a successful delete for the owner.
+      if (result.ok || result.status === 404) {
+        clearCurrentBusinessId();
+        showToast("success", "Business deleted. You can add a new one anytime.");
+        router.push("/opportunities");
+        return;
+      }
+      if (result.status === 401) {
+        router.replace(LOGIN_HREF);
+        return;
+      }
+      showToast("error", "I couldn't delete this business. Give it another try.");
+      setDeleting(false);
+    } catch {
+      showToast("error", "I couldn't reach the server. Give it another try.");
+      setDeleting(false);
+    }
+  }, [deleting, business.id, router, showToast]);
+
+  return (
+    <article
+      className="gv-card"
+      style={{
+        background: C.s1,
+        border: "1px solid " + C.border,
+        borderRadius: 16,
+        padding: m ? 20 : 24,
+        boxShadow: "var(--conn-card-shadow)",
+        display: "flex",
+        flexDirection: "column",
+        gap: 20,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 14, minWidth: 0 }}>
+        <span
+          style={{
+            width: 40,
+            height: 40,
+            borderRadius: 10,
+            flexShrink: 0,
+            background: C.s2,
+            border: "1px solid " + C.border,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <Icons name="builder" size={18} style={{ color: C.blueText }} />
+        </span>
+        <span style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 0, flex: 1 }}>
+          <span style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 17, lineHeight: "23px", color: C.text }}>
+            Your business
+          </span>
+          <span style={{ fontFamily: BODY, fontSize: 13, lineHeight: "18px", color: C.muted, textWrap: "pretty" }}>
+            Edit the details I read when I draft for you. Changes here don&apos;t run the audit on their own.
+          </span>
+        </span>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <span style={FIELD_LABEL_STYLE}>Business name</span>
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Ada's Bakery"
+            style={FIELD_INPUT_STYLE}
+          />
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <span style={FIELD_LABEL_STYLE}>Website</span>
+          <input
+            type="text"
+            value={websiteUrl}
+            onChange={(e) => {
+              setWebsiteUrl(e.target.value);
+              if (websiteChangedHint) setWebsiteChangedHint(false);
+            }}
+            placeholder="adasbakery.com"
+            style={FIELD_INPUT_STYLE}
+          />
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <span style={FIELD_LABEL_STYLE}>Industry</span>
+          <input
+            type="text"
+            value={industry}
+            onChange={(e) => setIndustry(e.target.value)}
+            placeholder="Bakery"
+            style={FIELD_INPUT_STYLE}
+          />
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <span style={FIELD_LABEL_STYLE}>Description</span>
+          <textarea
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="What you offer and who you serve."
+            rows={3}
+            style={{ ...FIELD_INPUT_STYLE, resize: "vertical", minHeight: 76 }}
+          />
+        </label>
+
+        {formError && (
+          <p style={{ ...NOTE_STYLE, color: C.bad }}>{formError}</p>
+        )}
+        {websiteChangedHint && (
+          <p style={NOTE_STYLE}>
+            I saved your new website.{" "}
+            <Link href="/opportunities" style={{ color: C.blueText, textDecoration: "underline" }}>
+              Run the audit in Opportunities
+            </Link>{" "}
+            to refresh your gaps.
+          </p>
+        )}
+
+        <div>
+          <ActionButton onClick={save} disabled={saving} m={m}>
+            {saving ? "Saving…" : "Save changes"}
+          </ActionButton>
+        </div>
+      </div>
+
+      <div style={{ borderTop: "1px solid " + C.border, paddingTop: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+        {!confirmingDelete ? (
+          <ActionButton variant="secondary" onClick={() => setConfirmingDelete(true)} m={m}>
+            Delete business
+          </ActionButton>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <p style={{ ...NOTE_STYLE, color: C.bad }}>
+              This permanently deletes this business and all its data · you&apos;ll start fresh. This can&apos;t be undone.
+            </p>
+            <div style={{ display: "flex", flexDirection: m ? "column" : "row", gap: 10 }}>
+              <ActionButton
+                variant="secondary"
+                onClick={() => setConfirmingDelete(false)}
+                disabled={deleting}
+                m={m}
+              >
+                Cancel
+              </ActionButton>
+              <ActionButton variant="secondary" danger onClick={remove} disabled={deleting} m={m}>
+                {deleting ? "Deleting…" : "Delete"}
+              </ActionButton>
+            </div>
+          </div>
+        )}
+      </div>
+    </article>
+  );
+}
+
 /* ── Screen ────────────────────────────────────────────────────────────── */
 
 function ConnectionsBody() {
@@ -1548,12 +1814,15 @@ function ConnectionsBody() {
     return () => clearTimeout(t);
   }, [toast]);
 
+  // The business card renders ONLY for a real, ready business (not demo / none / loading).
+  let businessCard: ReactNode = null;
   let gscCard: ReactNode;
   let githubCard: ReactNode;
   if (business.status === "loading") {
     gscCard = <GscCard state="loading" body={<p style={NOTE_STYLE}>Loading your dashboard…</p>} m={m} />;
     githubCard = <GithubCard state="loading" body={<p style={NOTE_STYLE}>Loading your dashboard…</p>} m={m} />;
-  } else if (business.status === "ready" && business.businessId) {
+  } else if (business.status === "ready" && business.businessId && business.business) {
+    businessCard = <BusinessConnection key={`biz-${business.businessId}`} business={business.business} showToast={showToast} />;
     gscCard = <SearchConsoleConnection key={`gsc-${business.businessId}`} businessId={business.businessId} showToast={showToast} />;
     githubCard = <GithubConnection key={`gh-${business.businessId}`} businessId={business.businessId} showToast={showToast} />;
   } else if (business.status === "demo") {
@@ -1601,6 +1870,7 @@ function ConnectionsBody() {
         </div>
 
         <div style={{ maxWidth: 720, display: "flex", flexDirection: "column", gap: m ? 24 : 32 }}>
+          {businessCard}
           {gscCard}
           {githubCard}
         </div>
