@@ -10,8 +10,10 @@ export const metadata: Metadata = {
 
 // No-flash theme boot: resolve theme before first paint (?theme, then
 // localStorage, then prefers-color-scheme), and track scroll for the nav.
-// Mirrors docs/landing-reference.html exactly.
-const THEME_BOOT = `try{var t=new URLSearchParams(location.search).get('theme')||localStorage.getItem('groville-theme');if(!t)t=window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';document.documentElement.setAttribute('data-theme',t)}catch(e){}
+// A valid ?theme (light|dark only) is also persisted so it survives a reload; the
+// write has its own try/catch so blocked storage still leaves a working data-theme.
+// Based on docs/landing-reference.html.
+const THEME_BOOT = `try{var q=new URLSearchParams(location.search).get('theme');var t=q==='light'||q==='dark'?q:null;if(t){try{localStorage.setItem('groville-theme',t)}catch(e){}}else{t=localStorage.getItem('groville-theme');if(t!=='light'&&t!=='dark')t=window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'}document.documentElement.setAttribute('data-theme',t)}catch(e){}
 addEventListener('scroll',function(){document.documentElement.classList.toggle('is-scrolled',scrollY>20)},{passive:true});`;
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
