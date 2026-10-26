@@ -23,11 +23,29 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 app = Flask(__name__, template_folder="templates", static_folder="static")
 
 from flask_cors import CORS
-CORS(app, supports_credentials=True, origins=[
-    "http://localhost:3000",
-    "https://groville.vercel.app",
-    "https://groville-git-main-the-alpha-s.vercel.app"
-])
+DEV_CORS_ORIGINS = ["http://localhost:3000"]
+
+
+def resolve_cors_origins(raw):
+    """Parse a comma-separated CORS_ALLOWED_ORIGINS value.
+
+    Fails closed: unset/blank (or only empty entries) falls back to the
+    localhost dev origin, never to "*".
+    """
+    origins = [o.strip() for o in (raw or "").split(",") if o.strip()]
+    return origins or list(DEV_CORS_ORIGINS)
+
+
+def resolve_debug(raw):
+    """DEBUG is off unless explicitly set to "true" (case-insensitive)."""
+    return (raw or "False").lower() == "true"
+
+
+CORS(
+    app,
+    supports_credentials=True,
+    origins=resolve_cors_origins(os.getenv("CORS_ALLOWED_ORIGINS")),
+)
 
 app.secret_key = os.getenv("SECRET_KEY")
 if not app.secret_key:
@@ -35,7 +53,7 @@ if not app.secret_key:
         "SECRET_KEY environment variable is missing"
     )
 
-app.config["DEBUG"] = os.getenv("DEBUG", "True").lower() == "true"
+app.config["DEBUG"] = resolve_debug(os.getenv("DEBUG"))
 
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
@@ -99,10 +117,10 @@ if __name__ == "__main__":
     ssl_context = ("cert.pem", "key.pem")  # cert file, key file
 
     app.run(
-        debug=app.config.get("DEBUG", True),
+        debug=app.config.get("DEBUG", False),
         host="0.0.0.0",
         port=port,
         threaded=True,
-        use_reloader=app.config.get("DEBUG", True),
+        use_reloader=app.config.get("DEBUG", False),
         # ssl_context=ssl_context
     )
