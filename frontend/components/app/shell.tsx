@@ -12,6 +12,7 @@ import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 import { useUser } from "@/lib/use-user";
 import { deleteAccount, isFlaskConfigured, logout as flaskLogout } from "@/lib/api";
 import { clearDemoUser } from "@/lib/demo-user";
+import { clearOnboardingCache } from "@/lib/onboarding";
 import { clearCurrentBusinessId } from "@/lib/current-business";
 import { useAuth } from "@/lib/auth-context";
 import { useSidebarCollapsed, toggleSidebarCollapsed } from "@/lib/sidebar";
@@ -313,6 +314,8 @@ function LogoutButton({ onNavigate, collapsed = false }: { onNavigate?: () => vo
     setBusy(true);
     if (isFlaskConfigured()) {
       await flaskLogout();
+      // The onboarding cache is browser-global; don't let it leak to the next account.
+      clearOnboardingCache();
       // Drop the cached session so the provider (and any guard) sees the user as
       // signed out immediately, not on the next hard refresh.
       await refresh();
@@ -320,6 +323,7 @@ function LogoutButton({ onNavigate, collapsed = false }: { onNavigate?: () => vo
       const supabase = getSupabaseBrowserClient();
       if (supabase) {
         await supabase.auth.signOut();
+        clearOnboardingCache();
       } else {
         // Demo mode: forget the persisted typed identity so the next sign-up /
         // login starts clean rather than inheriting this business.
@@ -525,6 +529,7 @@ function DeleteAccountModal({
         // Deleted, or the session is already gone — same client teardown as Log out, then replace
         // (not push) so the browser Back button can't return to a now-dead session.
         clearCurrentBusinessId();
+        clearOnboardingCache();
         await refresh();
         onNavigate?.();
         router.replace("/login");
