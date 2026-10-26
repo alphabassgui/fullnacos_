@@ -3,6 +3,7 @@ import os
 
 from groq import Groq
 
+from agent.groq_client import create_chat_completion
 from agent.prompts import OPPORTUNITY_GENERATION_SYSTEM_PROMPT
 from agent.opportunity_validation import (
     validate_opportunity_item,
@@ -35,11 +36,9 @@ Business understanding:
 Return a JSON array containing opportunities.
 """
 
-    response = client.chat.completions.create(
-        model=os.getenv(
-            "GROQ_MODEL",
-            "llama-3.3-70b-versatile",
-        ),
+    response = create_chat_completion(
+        client,
+        model_kind="text",
         messages=[
             {
                 "role": "system",

@@ -4,7 +4,10 @@ Unit tests for agent.gtm_engine (Visual GTM Intelligence Engine).
 import base64
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import httpx
 import pytest
+from groq import RateLimitError
 
 from agent.gtm_engine import (
     encode_tile_to_base64,
@@ -12,6 +15,29 @@ from agent.gtm_engine import (
     build_gtm_multimodal_prompt,
     analyze_gtm_tiles,
 )
+
+
+def _rate_limit_error(retry_after=None):
+    headers = {}
+    if retry_after is not None:
+        headers["retry-after"] = str(retry_after)
+    request = httpx.Request(
+        "POST", "https://api.groq.com/openai/v1/chat/completions"
+    )
+    response = httpx.Response(status_code=429, headers=headers, request=request)
+    return RateLimitError("rate limited", response=response, body=None)
+
+
+def _vision_response():
+    resp = MagicMock()
+    resp.choices = [
+        MagicMock(
+            message=MagicMock(
+                content='{"gtm_scores": {"overall": 71}, "opportunities": []}'
+            )
+        )
+    ]
+    return resp
 
 
 def test_encode_tile_to_base64(tmp_path):
@@ -159,6 +185,57 @@ def test_analyze_gtm_tiles_handles_llm_exception():
         mock_groq.return_value.chat.completions.create.side_effect = Exception("API rate limit exceeded")
         result = analyze_gtm_tiles({}, [], [])
 
+    assert result["gtm_scores"]["overall"] == 50
+    assert result["opportunities"] == []
+
+
+def test_analyze_gtm_tiles_retries_on_429_then_succeeds(monkeypatch):
+    import agent.groq_client as gc
+
+    monkeypatch.setattr(gc.time, "sleep", lambda *_a, **_k: None)
+    with patch("agent.gtm_engine.Groq") as mock_groq:
+        mock_groq.return_value.chat.completions.create.side_effect = [
+            _rate_limit_error(retry_after=1),
+            _vision_response(),
+        ]
+        result = analyze_gtm_tiles({}, [], [])
+
+    assert result["gtm_scores"]["overall"] == 71
+
+
+def test_analyze_gtm_tiles_fails_over_to_fallback_vision_model(monkeypatch):
+    import agent.groq_client as gc
+
+    monkeypatch.setattr(gc.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setenv("GROQ_VISION_MODEL", "vis-a")
+    monkeypatch.setenv("GROQ_VISION_MODEL_FALLBACKS", "vis-b")
+
+    with patch("agent.gtm_engine.Groq") as mock_groq:
+        create = mock_groq.return_value.chat.completions.create
+        create.side_effect = [
+            _rate_limit_error(),
+            _rate_limit_error(),
+            _rate_limit_error(),
+            _vision_response(),
+        ]
+        result = analyze_gtm_tiles({}, [], [])
+
+    assert result["gtm_scores"]["overall"] == 71
+    models = [c.kwargs["model"] for c in create.call_args_list]
+    assert models == ["vis-a", "vis-a", "vis-a", "vis-b"]
+
+
+def test_analyze_gtm_tiles_persistent_429_returns_graceful_default(monkeypatch):
+    import agent.groq_client as gc
+
+    monkeypatch.setattr(gc.time, "sleep", lambda *_a, **_k: None)
+    with patch("agent.gtm_engine.Groq") as mock_groq:
+        mock_groq.return_value.chat.completions.create.side_effect = [
+            _rate_limit_error() for _ in range(3)
+        ]
+        result = analyze_gtm_tiles({}, [], [])
+
+    # Wrapper exhausted -> gtm_engine's final graceful empty-default fallback.
     assert result["gtm_scores"]["overall"] == 50
     assert result["opportunities"] == []
 

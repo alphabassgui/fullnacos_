@@ -5,6 +5,7 @@ import time
 
 from groq import Groq
 
+from agent.groq_client import create_chat_completion
 from agent.prompts import (
     OBSERVATION_ANALYSIS_SYSTEM_PROMPT,
     OBSERVATION_ANALYSIS_USER_PROMPT,
@@ -87,11 +88,9 @@ def analyze_observation(observation):
 
     for attempt in range(_MAX_ATTEMPTS):
         try:
-            response = client.chat.completions.create(
-                model=os.getenv(
-                    "GROQ_MODEL",
-                    "llama-3.3-70b-versatile",
-                ),
+            response = create_chat_completion(
+                client,
+                model_kind="text",
                 messages=[
                     {
                         "role": "system",

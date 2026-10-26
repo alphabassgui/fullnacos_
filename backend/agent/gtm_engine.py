@@ -20,6 +20,8 @@ from typing import Any
 from dotenv import load_dotenv
 from groq import Groq
 
+from agent.groq_client import create_chat_completion
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -258,15 +260,15 @@ def analyze_gtm_tiles(
     api_key = os.getenv("GROQ_API_KEY")
     client = Groq(api_key=api_key)
 
-    # Default is overridable via GROQ_VISION_MODEL. Groq rotates/retires vision
-    # models, so set that env var to a current multimodal model id in each
-    # environment; the previous default (llama-3.2-11b-vision-preview) was
+    # Vision model selection (primary GROQ_VISION_MODEL + GROQ_VISION_MODEL_FALLBACKS)
+    # and 429 retry/failover are handled by create_chat_completion. Groq rotates/
+    # retires vision models, so set those env vars to current multimodal model ids
+    # per environment; the previous default (llama-3.2-11b-vision-preview) was
     # decommissioned by Groq.
-    model_name = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
-
     try:
-        response = client.chat.completions.create(
-            model=model_name,
+        response = create_chat_completion(
+            client,
+            model_kind="vision",
             messages=messages,
             temperature=0.2,
             response_format={"type": "json_object"},
@@ -275,5 +277,5 @@ def analyze_gtm_tiles(
         return parse_gtm_vision_output(raw_text)
     except Exception as exc:
         logger.error("Vision LLM analysis failed: %s", exc)
-        # Fallback structured defaults
+        # Fallback structured defaults (last resort after retry + failover).
         return parse_gtm_vision_output({})
