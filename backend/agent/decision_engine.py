@@ -3,6 +3,7 @@ import os
 
 from groq import Groq
 
+from agent.groq_client import create_chat_completion
 from agent.prompts import DECISION_ENGINE_SYSTEM_PROMPT
 from services.learning_service import get_business_learnings
 
@@ -168,11 +169,9 @@ current opportunity, but still consider the current business
 analysis and opportunity evidence.
 """
 
-    response = client.chat.completions.create(
-        model=os.getenv(
-            "GROQ_MODEL",
-            "llama-3.3-70b-versatile",
-        ),
+    response = create_chat_completion(
+        client,
+        model_kind="text",
         messages=[
             {
                 "role": "system",
