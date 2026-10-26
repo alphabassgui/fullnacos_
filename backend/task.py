@@ -328,7 +328,16 @@ def run_gtm_analysis(self, business_id, user_id, run_id):
         user_manifest = render_and_tile_page(website_url, user_tiles_dir)
 
         # 3. Discover Competitors & Tile
-        competitors = discover_competitors(business_id, user_id, max_competitors=2)
+        # Seed queries feed BOTH competitor discovery and the vision prompt, and
+        # get_gtm_seed_queries can hit the GSC API + a Firestore read — compute
+        # them once here and thread the single result through both consumers.
+        seed_queries = get_gtm_seed_queries(business_id, user_id)
+        competitors = discover_competitors(
+            business_id,
+            user_id,
+            max_competitors=2,
+            seed_queries=seed_queries,
+        )
         competitor_manifests = []
         for idx, comp in enumerate(competitors, start=1):
             comp_url = comp.get("url")
@@ -341,8 +350,7 @@ def run_gtm_analysis(self, business_id, user_id, run_id):
                 except Exception as exc:
                     pass
 
-        # 4. Pull Seed Queries & Evaluate via Vision LLM
-        seed_queries = get_gtm_seed_queries(business_id, user_id)
+        # 4. Evaluate via Vision LLM (reusing the seed queries from step 3)
         analysis_result = analyze_gtm_tiles(
             user_manifest=user_manifest,
             competitor_manifests=competitor_manifests,
