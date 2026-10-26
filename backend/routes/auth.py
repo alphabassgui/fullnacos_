@@ -1,4 +1,5 @@
 import hmac
+import logging
 import secrets
 from flask import Blueprint, render_template, request, redirect, url_for, flash, session, current_app
 from firebase_admin import auth as admin_auth
@@ -17,6 +18,7 @@ from redis_helpers import (
 )
 
 auth_bp = Blueprint("auth", __name__, template_folder="../templates")
+logger = logging.getLogger(__name__)
 
 
 # ══════════════════════════════════════════════
@@ -392,17 +394,58 @@ def logout():
 # ❻  REGISTER
 # ══════════════════════════════════════════════
 
+_ALREADY_REGISTERED = "Email already registered. Please login or use another email."
+
+
+def delete_firebase_user(uid: str) -> bool:
+    """Best-effort, IRREVERSIBLE removal of a Firebase Auth record. Never raises.
+
+    Callers must only pass a uid that is (a) the authenticated, email-confirmed
+    user's own account being deleted, or (b) an Auth record proven to have no
+    Firestore user doc (orphan), or (c) a record this process just created."""
+    try:
+        admin_auth.delete_user(uid)
+        return True
+    except admin_auth.UserNotFoundError:
+        return True
+    except Exception as exc:
+        logger.warning(f"Firebase Auth delete failed for uid {uid}: {exc}")
+        return False
+
+
 def create_firebase_user_and_firestore(email: str, password: str, user_data: dict):
     try:
         try:
-            admin_auth.get_user_by_email(email)
-            return None, "Email already registered. Please login or use another email."
+            existing = admin_auth.get_user_by_email(email)
         except admin_auth.UserNotFoundError:
-            pass
+            existing = None
+
+        if existing is not None:
+            # HARD GUARD: only delete the Auth record when NO Firestore users doc
+            # exists for it (by email OR by uid). An Auth record with a live
+            # Firestore user is a real account and must never be deleted.
+            by_email = (
+                db.collection("users")
+                .where(filter=FieldFilter("email", "==", email))
+                .limit(1)
+                .get()
+            )
+            by_uid = db.collection("users").document(existing.uid).get()
+            if by_email or by_uid.exists:
+                return None, _ALREADY_REGISTERED
+            # Orphaned Auth record (e.g. left by a past account deletion or a
+            # partial registration failure): clear it and register normally.
+            if not delete_firebase_user(existing.uid):
+                return None, "Could not clear stale authentication record."
 
         user_record = admin_auth.create_user(email=email, password=password)
         uid = user_record.uid
-        db.collection("users").document(uid).set(user_data)
+        try:
+            db.collection("users").document(uid).set(user_data)
+        except Exception:
+            # Roll back the just-created Auth record so no orphan is left behind.
+            delete_firebase_user(uid)
+            raise
         return uid, None
     except Exception as e:
         return None, str(e)

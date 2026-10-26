@@ -217,6 +217,133 @@ def test_register_duplicate_email(fake_firebase, client):
     assert "firebase-uid-1" not in db._store
 
 
+def _stub_auth_record(monkeypatch, routes_auth, uid="orphan-uid"):
+    """Make Firebase Auth report an existing record; capture delete_user calls."""
+    deleted = []
+    monkeypatch.setattr(
+        routes_auth.admin_auth, "get_user_by_email",
+        lambda email: types.SimpleNamespace(uid=uid),
+    )
+    monkeypatch.setattr(routes_auth.admin_auth, "delete_user", deleted.append)
+    return deleted
+
+
+def test_register_self_heals_orphan_auth_record(fake_firebase, client, monkeypatch):
+    db, routes_auth, auth_api = fake_firebase
+    deleted = _stub_auth_record(monkeypatch, routes_auth)
+    created = []
+    monkeypatch.setattr(
+        routes_auth.admin_auth, "create_user",
+        lambda **kw: created.append(kw) or types.SimpleNamespace(uid="firebase-uid-1"),
+    )
+
+    resp = post_json(client, "/api/auth/register", {
+        "username": "Back", "email": "back@example.com", "password": "password123",
+    }, "10.0.0.20")
+
+    assert resp.status_code == 201
+    assert deleted == ["orphan-uid"]
+    assert len(created) == 1
+    assert db.collection("users").document("firebase-uid-1").data["email"] == "back@example.com"
+
+
+def test_register_real_duplicate_never_deletes_auth_record(fake_firebase, monkeypatch):
+    # Helper-level: an Auth record with a live Firestore user (by email) is a
+    # genuine duplicate and must NOT be deleted.
+    db, routes_auth, auth_api = fake_firebase
+    deleted = _stub_auth_record(monkeypatch, routes_auth, uid="live-uid")
+    seed_users(db, {"live-uid": {"email": "live@example.com"}})
+
+    uid, error = routes_auth.create_firebase_user_and_firestore("live@example.com", "password123", {})
+
+    assert uid is None
+    assert "already registered" in error.lower()
+    assert deleted == []
+
+
+def test_register_duplicate_via_api_with_auth_record_returns_409(fake_firebase, client, monkeypatch):
+    db, routes_auth, auth_api = fake_firebase
+    deleted = _stub_auth_record(monkeypatch, routes_auth, uid="live-uid")
+    seed_users(db, {"live-uid": {"email": "live@example.com"}})
+
+    resp = post_json(client, "/api/auth/register", {
+        "username": "Dup", "email": "live@example.com", "password": "password123",
+    }, "10.0.0.21")
+
+    assert resp.status_code == 409
+    assert "already registered" in resp.get_json()["error"].lower()
+    assert deleted == []
+
+
+def test_register_auth_record_with_live_uid_doc_is_not_deleted(fake_firebase, monkeypatch):
+    # Firestore doc exists under the Auth uid but its email field differs/missing:
+    # still a live account, never deleted.
+    db, routes_auth, auth_api = fake_firebase
+    deleted = _stub_auth_record(monkeypatch, routes_auth, uid="live-uid")
+    seed_users(db, {"live-uid": {"username": "NoEmail"}})
+
+    uid, error = routes_auth.create_firebase_user_and_firestore("x@example.com", "password123", {})
+
+    assert uid is None
+    assert "already registered" in error.lower()
+    assert deleted == []
+
+
+def test_register_orphan_delete_failure_returns_error_without_create(fake_firebase, monkeypatch):
+    db, routes_auth, auth_api = fake_firebase
+    _stub_auth_record(monkeypatch, routes_auth)
+
+    def boom(uid):
+        raise RuntimeError("firebase down")
+
+    monkeypatch.setattr(routes_auth.admin_auth, "delete_user", boom)
+    created = []
+    monkeypatch.setattr(
+        routes_auth.admin_auth, "create_user",
+        lambda **kw: created.append(kw) or types.SimpleNamespace(uid="firebase-uid-1"),
+    )
+
+    uid, error = routes_auth.create_firebase_user_and_firestore("o@example.com", "password123", {})
+
+    assert uid is None and error
+    assert created == []
+
+
+def test_register_rolls_back_auth_user_when_firestore_write_fails(fake_firebase, client, monkeypatch):
+    db, routes_auth, auth_api = fake_firebase
+    deleted = []
+    monkeypatch.setattr(routes_auth.admin_auth, "delete_user", deleted.append)
+
+    def failing_set(self, data):
+        raise RuntimeError("firestore down")
+
+    monkeypatch.setattr(type(db.collection("users").document("x")), "set", failing_set)
+
+    resp = post_json(client, "/api/auth/register", {
+        "username": "Roll", "email": "roll@example.com", "password": "password123",
+    }, "10.0.0.22")
+
+    assert resp.status_code == 500
+    assert deleted == ["firebase-uid-1"]
+    assert ("users", "firebase-uid-1") not in db._store
+
+
+def test_delete_firebase_user_is_best_effort(fake_firebase, monkeypatch):
+    db, routes_auth, auth_api = fake_firebase
+
+    def boom(uid):
+        raise RuntimeError("firebase down")
+
+    monkeypatch.setattr(routes_auth.admin_auth, "delete_user", boom)
+    assert routes_auth.delete_firebase_user("u1") is False
+
+    def gone(uid):
+        raise UserNotFoundError(uid)
+
+    monkeypatch.setattr(routes_auth.admin_auth, "delete_user", gone)
+    assert routes_auth.delete_firebase_user("u1") is True
+
+
 def test_register_rate_limit(fake_firebase, client):
     ip = "10.0.0.9"
     for i in range(3):
@@ -721,6 +848,8 @@ def account_db(monkeypatch):
     monkeypatch.setattr(auth_api.connection_service, "revoke_github_token", lambda *a, **k: True)
     monkeypatch.setattr(auth_api.connection_service, "revoke_google_token", lambda *a, **k: True)
     monkeypatch.setattr(auth_api.tile_storage_service, "delete_tiles_for_business", lambda *a, **k: None)
+    # Never hit real Firebase Auth; tests that care override this.
+    monkeypatch.setattr(auth_api.auth.admin_auth, "delete_user", lambda uid: None)
     return db, auth_api
 
 
@@ -888,3 +1017,45 @@ def test_delete_account_route_registered(flask_app):
     )
     assert rule is not None
     assert "DELETE" in rule.methods
+
+
+def test_delete_account_also_deletes_firebase_auth_user(account_db, client, monkeypatch):
+    db, auth_api = account_db
+    _seed_account(db, "u1", "alice@example.com")
+    _login(client, "u1")
+    deleted = []
+    monkeypatch.setattr(auth_api.auth.admin_auth, "delete_user", deleted.append)
+
+    resp = client.delete("/api/auth/account", json={"confirm_email": "alice@example.com"})
+    assert resp.status_code == 200
+    assert deleted == ["u1"]
+    assert ("users", "u1") not in db._store
+
+
+def test_delete_account_firebase_auth_failure_still_200(account_db, client, monkeypatch):
+    db, auth_api = account_db
+    _seed_account(db, "u1", "alice@example.com")
+    _login(client, "u1")
+
+    def boom(uid):
+        raise RuntimeError("firebase down")
+
+    monkeypatch.setattr(auth_api.auth.admin_auth, "delete_user", boom)
+
+    resp = client.delete("/api/auth/account", json={"confirm_email": "alice@example.com"})
+    assert resp.status_code == 200
+    assert resp.get_json() == {"success": True, "message": "Account deleted"}
+    assert ("users", "u1") not in db._store
+    assert [p for p in db._store if p[:2] == ("businesses", "u1-b1")] == []
+
+
+def test_delete_account_wrong_email_does_not_delete_firebase_user(account_db, client, monkeypatch):
+    db, auth_api = account_db
+    _seed_account(db, "u1", "alice@example.com")
+    _login(client, "u1")
+    deleted = []
+    monkeypatch.setattr(auth_api.auth.admin_auth, "delete_user", deleted.append)
+
+    resp = client.delete("/api/auth/account", json={"confirm_email": "wrong@example.com"})
+    assert resp.status_code == 400
+    assert deleted == []

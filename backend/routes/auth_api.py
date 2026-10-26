@@ -301,7 +301,7 @@ def api_delete_account():
     Search Console OAuth tokens are revoked provider-side and the business's
     Supabase tile blobs are cleaned up — both strictly best-effort, so neither a
     provider outage nor a storage hiccup can block the deletion or change the
-    200 response.
+    200 response. The Firebase Auth record is removed last, also best-effort.
 
     Because deletion is irreversible, it requires a server-side confirmation:
     the caller must send their own account email in ``confirm_email`` and this
@@ -365,6 +365,10 @@ def api_delete_account():
 
         # ── Finally the user doc itself, then drop the session ──
         user_ref.delete()
+
+        # ── Remove the Firebase Auth record too, so the email can re-register.
+        #    Best-effort (helper never raises): cannot change the 200 response. ──
+        auth.delete_firebase_user(user_id)
         session.clear()
 
         return jsonify({"success": True, "message": "Account deleted"}), 200
