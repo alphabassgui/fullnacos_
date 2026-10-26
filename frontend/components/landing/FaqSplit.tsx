@@ -5,8 +5,8 @@ import Link from "next/link";
 import { Badge, Button, Logomark } from "@/components/ds";
 
 const FAQ_ITEMS: [string, string][] = [
-  ["What does Groville actually do?", "It reads your website and Google Search Console, finds the biggest search opportunity you're missing, and drafts an SEO article and social posts to win it. You approve before anything is published."],
-  ["What data do you need?", "Read-only access to your website and Google Search Console. That's all. I can't edit your site, change your settings, or spend your money."],
+  ["What does Groville actually do?", "It reads your website and the search landscape, finds the biggest search opportunity you're missing, and drafts an SEO article and social posts to win it. You approve before anything is published."],
+  ["What data do you need?", "Read-only access to your website. Connecting Google Search Console is optional and only lets you view your search data in Groville. I can't edit your site, change your settings, or spend your money."],
   ["Can it publish on its own?", "Never. Every draft waits for you, and publishing stays with you."],
   ["How long is setup?", "About nine minutes, from connecting a data source to your first campaign ready to approve."],
   ["What does it cost?", "Start free. Paid plans scale with how many campaigns you run each month."],

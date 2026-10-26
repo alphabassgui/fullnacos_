@@ -35,7 +35,7 @@ export function Hero() {
           className="gv-hero-sub"
           style={{ margin: 0, maxWidth: 640, fontSize: "var(--text-body-md)", lineHeight: "var(--lh-body-md)", letterSpacing: "var(--track-body)", color: "var(--text-secondary)" }}
         >
-          Groville reads your site and Google Search Console, finds the customers you&apos;re missing, and drafts the campaign to win them. You approve every move.
+          Groville reads your site, finds the customers you&apos;re missing, and drafts the campaign to win them. You approve every move.
         </p>
         <div className="gv-hero-cta" style={{ display: "flex", gap: 16, flexWrap: "wrap", justifyContent: "center" }}>
           <ButtonGroup className="gv-hero-cta-1" href="/signup">
@@ -70,13 +70,8 @@ const PARTNER_MARKS: Record<string, ReactNode> = {
       <circle cx="11.6" cy="9" r="5.1" opacity=".6" />
     </g>
   ),
-  "Command+R": (
-    <g fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M6.6 2.6 2.8 9l3.8 6.4" />
-      <path d="M11.4 2.6 15.2 9l-3.8 6.4" />
-    </g>
-  ),
-  Catalog: <path d="M15 5.2A6.8 6.8 0 1 0 15 12.8" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />,
+  Keble: <path d="M4 2.5h2.4v5.1l4.6-5.1h3L8.6 8.7l5.6 6.8h-3L6.4 9.9v5.6H4z" />,
+  Vivest: <path d="M2.6 2.6h2.6L9 12.2l3.8-9.6h2.6L10 15.4H8z" />,
 };
 
 function PartnerLogo({ name }: { name: string }) {
@@ -90,7 +85,7 @@ function PartnerLogo({ name }: { name: string }) {
   );
 }
 
-const PARTNERS = ["BMONI", "NACOS", "BUILD X", "Helix AI", "Oracle", "Command+R", "Catalog"];
+const PARTNERS = ["BMONI", "NACOS", "BUILD X", "Helix AI", "Oracle", "Keble", "Vivest"];
 
 export function LogoStrip() {
   const set = (half: number) => (
@@ -118,7 +113,7 @@ export function LogoStrip() {
         }}
       />
       <div className="gv-strip-static">
-        <span className="gv-strip-label">Trusted by operators at</span>
+        <span className="gv-strip-label">Built with and backed by</span>
         <div className="gv-strip-grid">
           {PARTNERS.map((n) => (
             <PartnerLogo key={n} name={n} />
@@ -127,7 +122,7 @@ export function LogoStrip() {
       </div>
       <div className="gv-strip-row" style={{ position: "relative", maxWidth: 1200, margin: "0 auto", display: "flex", alignItems: "center", gap: 40 }}>
         <span style={{ fontFamily: "var(--font-mono)", fontSize: 10.5, fontWeight: 500, letterSpacing: "0.96px", color: "var(--text-muted)", flexShrink: 0, whiteSpace: "nowrap" }}>
-          TRUSTED BY OPERATORS AT
+          BUILT WITH AND BACKED BY
         </span>
         <div
           className="gv-marquee"
@@ -169,7 +164,7 @@ export function Benchmarks() {
   return (
     <Section className="section--cards" style={{ position: "relative", overflow: "hidden" }}>
       <div className="gv-bloom" style={{ position: "absolute", left: -300, top: -56, width: 800, height: 800, opacity: 0.15, background: "var(--gradient-mesh)", pointerEvents: "none" }} />
-      <SectionHeader eyebrow="Built for real shops" line1="Numbers from" accent="live accounts." description="No marketing math. These are medians across live Groville accounts, refreshed weekly." />
+      <SectionHeader eyebrow="Example snapshot" line1="A week with" accent="Groville." description="An illustrative look at what Groville tracks for a shop like Ada's Bakery, not aggregate customer data." />
       <MetricCards />
     </Section>
   );
