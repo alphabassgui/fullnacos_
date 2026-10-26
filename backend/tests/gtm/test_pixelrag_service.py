@@ -1,6 +1,7 @@
 import json
 import pytest
 from unittest.mock import MagicMock, patch, call
+import services.pixelrag_service as pixelrag_service
 from services.pixelrag_service import (
     render_and_tile_page,
     get_tile_filename,
@@ -233,3 +234,9 @@ def test_get_tile_filename_standard_and_overflow():
     assert get_tile_filename(4) == "tile_0004_pricing.webp"
     # Overflow beyond TILE_LABELS length
     assert get_tile_filename(15) == "tile_0015_section_15.webp"
+
+
+def test_inter_tile_settle_ms_is_trimmed():
+    # Conservative trim from the original 250ms: a shorter paint/lazy-load settle
+    # window between tiles, not removed. Memory-sensitive settings are untouched.
+    assert pixelrag_service.INTER_TILE_SETTLE_MS == 100

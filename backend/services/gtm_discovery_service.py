@@ -228,9 +228,15 @@ def discover_competitors(
     business_id: str,
     user_id: str,
     max_competitors: int = 2,
+    seed_queries: list[str] | None = None,
 ) -> list[dict[str, str]]:
     """
     End-to-end competitor discovery workflow for a business.
+
+    ``seed_queries`` may be supplied by the caller to reuse an already-computed
+    list (get_gtm_seed_queries can hit the GSC API + a Firestore read, so a GTM
+    run that needs the queries for both discovery and the vision prompt computes
+    them once and threads them through). When omitted, they are computed here.
     """
     business_ref = db.collection("businesses").document(business_id)
     doc = business_ref.get()
@@ -244,7 +250,8 @@ def discover_competitors(
     user_website = data.get("website_url") or ""
     user_domain = _extract_clean_domain(user_website)
 
-    seed_queries = get_gtm_seed_queries(business_id, user_id)
+    if seed_queries is None:
+        seed_queries = get_gtm_seed_queries(business_id, user_id)
     raw_results: list[dict[str, str]] = []
 
     for query in seed_queries[:3]:

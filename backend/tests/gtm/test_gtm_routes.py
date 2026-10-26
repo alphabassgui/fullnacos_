@@ -325,3 +325,43 @@ def test_run_gtm_analysis_missing_competitor_insights_key_is_safe(mock_gtm_busin
     assert competitors[0]["weaknesses"] == []
 
 
+def test_run_gtm_analysis_computes_seed_queries_once(mock_gtm_business_doc, tmp_path):
+    # Seed queries feed both competitor discovery AND the vision prompt. They must
+    # be computed exactly once per run and threaded through — not recomputed. Here
+    # discover_competitors runs for real (only its network search is stubbed) so
+    # that, with seed_queries passed in, it does NOT call get_gtm_seed_queries
+    # internally; the sole call is the task's own.
+    from task import run_gtm_analysis
+
+    mock_run_ref = MagicMock()
+    mock_manifest = {
+        "url": "https://mysite.com",
+        "tiles": [{"filename": "tile_0001_hero.webp", "path": str(tmp_path / "tile.webp")}],
+    }
+    mock_analysis = {
+        "gtm_scores": {"overall": 80},
+        "blind_spots": [],
+        "opportunities": [],
+    }
+
+    with patch("firebase.db.collection") as mock_db, \
+         patch("services.pixelrag_service.render_and_tile_page", return_value=mock_manifest), \
+         patch("services.gtm_discovery_service.get_gtm_seed_queries", return_value=["seo tool"]) as mock_seed, \
+         patch("services.gtm_discovery_service.search_organic_competitors", return_value=[]), \
+         patch("agent.gtm_engine.analyze_gtm_tiles", return_value=mock_analysis) as mock_analyze, \
+         patch("services.gtm_dossier_service.generate_gtm_dossier_markdown", return_value="# Dossier"), \
+         patch("services.gtm_dossier_service.save_dossier_to_file", return_value="static/dossiers/run-1.md"), \
+         patch("services.opportunity_service.create_opportunity", return_value={"id": "opp-1"}):
+
+        mock_db.return_value.document.return_value.get.return_value = mock_gtm_business_doc
+        mock_db.return_value.document.return_value.collection.return_value.document.return_value = mock_run_ref
+
+        res = run_gtm_analysis(business_id="biz-1", user_id="user-1", run_id="run-1")
+
+    assert res["success"] is True
+    # The single compute per run — not once for discovery and again for the prompt.
+    assert mock_seed.call_count == 1
+    # And the same computed list is what reaches the vision prompt.
+    assert mock_analyze.call_args.kwargs["search_queries"] == ["seo tool"]
+
+

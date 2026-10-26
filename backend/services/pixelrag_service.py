@@ -41,6 +41,12 @@ COOKIE_SELECTORS = [
     "button[class*='cookie' i]",
 ]
 
+# Settle delay after scrolling the next band into view, before capturing it,
+# so freshly-scrolled / lazy-loaded content has a moment to paint. This is a
+# paint/lazy-load settle window, not an anti-mid-animation guard (animations are
+# frozen separately via animations="disabled" on each screenshot).
+INTER_TILE_SETTLE_MS = 100
+
 CHROMIUM_LAUNCH_ARGS = [
     "--disable-dev-shm-usage",   # use /tmp instead of tiny 64MB /dev/shm — the key OOM fix
     "--no-sandbox",              # required on Render's non-root container
@@ -239,7 +245,7 @@ def render_and_tile_page(
                             page.mouse.wheel(0, current_slice_height)
                         except Exception:
                             pass
-                        page.wait_for_timeout(250)
+                        page.wait_for_timeout(INTER_TILE_SETTLE_MS)
 
                         offset += current_slice_height
                         tile_idx += 1
