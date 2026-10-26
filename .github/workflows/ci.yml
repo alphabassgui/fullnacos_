@@ -61,10 +61,15 @@ jobs:
               f.write(f"FIREBASE_CREDENTIALS={path}\n")
           PY
 
+      # SECRET_KEY and TOKEN_ENCRYPTION_KEY are read from the environment by the
+      # app/services (the maintainer's local run gets them from backend/.env).
+      # These are throwaway, non-secret CI values; TOKEN_ENCRYPTION_KEY is a valid Fernet key.
       - name: Run tests
         working-directory: backend
         env:
           GROQ_API_KEY: test-groq-api-key
+          SECRET_KEY: ci-dummy-secret-key
+          TOKEN_ENCRYPTION_KEY: vSiYSo9eqy4MSVZNb3O7yNsqP2n0fWx6a6WFxwfnA-U=
         run: python -m pytest tests/
 
   frontend:
