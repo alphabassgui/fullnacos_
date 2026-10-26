@@ -9,6 +9,7 @@ import { useMediaQuery } from "./use-media-query";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 import { fetchMe, isFlaskConfigured, login as flaskLogin, register as flaskRegister } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
+import { clearOnboardingCache } from "@/lib/onboarding";
 import { onboardedOptimistic, postAuthDest } from "@/lib/redirect";
 import { getStoredDemoUser, saveDemoUser } from "@/lib/demo-user";
 
@@ -508,7 +509,10 @@ export function AuthScreen({ mode, callbackUrl }: { mode: "signup" | "login"; ca
       // Populate the shared auth state before navigating so the destination's
       // RequireAuth sees the signed-in user instead of bouncing back to /login.
       await refresh();
-      router.push(callbackUrl ?? welcomeHref());
+      // A brand-new signup is never onboarded: drop any stale cache from a previous account
+      // on this browser and ignore callbackUrl so they always start at /welcome.
+      clearOnboardingCache();
+      router.push(welcomeHref());
       return;
     }
 
@@ -522,7 +526,8 @@ export function AuthScreen({ mode, callbackUrl }: { mode: "signup" | "login"; ca
         email: email.trim() || null,
         businessName: businessName.trim() || null,
       });
-      router.push(callbackUrl ?? welcomeHref());
+      clearOnboardingCache();
+      router.push(welcomeHref());
       return;
     }
     const name = businessName.trim();
@@ -545,6 +550,7 @@ export function AuthScreen({ mode, callbackUrl }: { mode: "signup" | "login"; ca
       setNotice("Check your email to confirm your account, then log in.");
       return;
     }
+    clearOnboardingCache();
     router.push(welcomeHref());
   };
 
@@ -563,6 +569,9 @@ export function AuthScreen({ mode, callbackUrl }: { mode: "signup" | "login"; ca
         setError(li.data?.error ?? "Could not log you in. Please try again.");
         return;
       }
+      // Flask's server flag is the source of truth here; drop any stale cache from a previous
+      // account so it can't force the optimistic value true for someone not onboarded.
+      clearOnboardingCache();
       // Populate the shared auth state before navigating so the destination's
       // RequireAuth sees the signed-in user instead of bouncing back to /login.
       await refresh();

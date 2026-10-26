@@ -50,6 +50,17 @@ function isSyncPending(): boolean {
   }
 }
 
+/** Forget the browser-global onboarding cache + pending-sync marker. Call at auth boundaries
+ *  (signup / Flask login / logout / delete), never at onboarding finish. Never throws. */
+export function clearOnboardingCache(): void {
+  try {
+    localStorage.removeItem(ONBOARDED_KEY);
+    localStorage.removeItem(ONBOARDING_SYNC_PENDING_KEY);
+  } catch {
+    // no-op when storage is unavailable
+  }
+}
+
 /**
  * Push "onboarding complete" to the backend (the source of truth) with a few
  * bounded retries. On success clears the pending marker; on exhaustion sets it so
