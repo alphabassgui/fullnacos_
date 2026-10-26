@@ -4,7 +4,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Icons, Logomark, Wordmark } from "@/components/ds";
+import { Icons, Logomark, Mode, Wordmark } from "@/components/ds";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useIsMobile, usePrefersReducedMotion } from "./use-media-query";
 import { Tour } from "./Tour";
@@ -852,6 +852,7 @@ function TopBar({ title, chips }: { title: string; chips?: ReactNode }) {
       </h1>
       <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 12 }}>
         {chips ?? DEFAULT_CHIPS}
+        <Mode />
         <button aria-label="Notifications" style={iconBtn}>
           <Icons name="bell" size={18} style={{ color: C.secondary }} />
         </button>
@@ -929,6 +930,7 @@ function MobileTopBar({ title, onMenu, chips }: { title: string; onMenu: () => v
       </h1>
       <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
         {chips}
+        <Mode />
         <button aria-label="Notifications" style={iconBtn}>
           <Icons name="bell" size={18} style={{ color: C.secondary }} />
         </button>
