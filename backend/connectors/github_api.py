@@ -51,6 +51,7 @@ class GitHubAPI:
             "redirect_uri": GITHUB_REDIRECT_URI,
             "scope": "repo",
             "state": state,
+            "prompt": "select_account",
         }
 
         authorization_url = (
