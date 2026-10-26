@@ -26,6 +26,41 @@ jobs:
           pip install -r backend/requirements.txt
           pip install pytest
 
+      # backend/firebase.py parses FIREBASE_CREDENTIALS at import (no network call),
+      # so CI supplies a throwaway, non-secret service-account cert to satisfy parsing.
+      - name: Generate throwaway Firebase credentials
+        run: |
+          python - <<'PY'
+          import json, os
+          from cryptography.hazmat.primitives.asymmetric import rsa
+          from cryptography.hazmat.primitives import serialization
+
+          key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+          pem = key.private_bytes(
+              serialization.Encoding.PEM,
+              serialization.PrivateFormat.TraditionalOpenSSL,
+              serialization.NoEncryption(),
+          ).decode()
+
+          cred = {
+              "type": "service_account",
+              "project_id": "ci-dummy-project",
+              "private_key_id": "ci-dummy-key-id",
+              "private_key": pem,
+              "client_email": "ci-dummy@ci-dummy-project.iam.gserviceaccount.com",
+              "client_id": "000000000000000000000",
+              "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+              "token_uri": "https://oauth2.googleapis.com/token",
+              "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+              "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/ci-dummy%40ci-dummy-project.iam.gserviceaccount.com",
+          }
+          path = os.path.join(os.environ["RUNNER_TEMP"], "ci-firebase-credentials.json")
+          with open(path, "w") as f:
+              json.dump(cred, f)
+          with open(os.environ["GITHUB_ENV"], "a") as f:
+              f.write(f"FIREBASE_CREDENTIALS={path}\n")
+          PY
+
       - name: Run tests
         working-directory: backend
         env:
