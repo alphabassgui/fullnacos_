@@ -5,7 +5,7 @@ import { Icons } from "@/components/ds";
 
 const BLUE = "#185DF1";
 const BLUE_TEXT = "var(--accent-text)";
-const GREEN = "var(--success, #2BB673)";
+const GREEN = "var(--success)";
 
 const EYEBROW: CSSProperties = { fontFamily: "var(--font-mono)", fontSize: 10, letterSpacing: "0.96px", textTransform: "uppercase", color: "var(--text-muted)" };
 const TITLE: CSSProperties = { fontFamily: "var(--font-display)", fontWeight: 600, fontSize: 22, lineHeight: "28px", letterSpacing: "-0.4px", color: "var(--text)", margin: 0 };
@@ -73,7 +73,7 @@ function BentoCard({
     <div className={"gv-bento " + (className || "")} onPointerMove={track} style={{ animationDelay: index * 110 + "ms" }}>
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
         <span style={EYEBROW}>
-          {num} — {eyebrow}
+          {num} · {eyebrow}
         </span>
         <IconTile name={icon} />
       </div>
@@ -207,7 +207,7 @@ export function CapabilityBento() {
         eyebrow="Search data"
         icon="telemetry"
         title="It finds the gap in your search"
-        description="Groville reads your site and Google Search Console, then names the single biggest query you're missing. Right now for Ada's Bakery: 'bakery near me', 880 searches a month, ranked 34th."
+        description="Groville reads your site and the search landscape, then names the single biggest query you're missing. Right now for Ada's Bakery: 'bakery near me', 880 searches a month, ranked 34th."
       >
         <SearchVisual />
       </BentoCard>

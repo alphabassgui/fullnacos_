@@ -13,27 +13,15 @@ type Voice = {
   accent: string;
   post: string;
   support: string;
-  stars: number;
-  date: string;
 };
 
 const T_VOICES: Voice[] = [
-  { name: "Ada Osei", role: "Owner", company: "Ada's Bakery", initials: "AO", pre: "Groville wrote the campaigns and two of them ", accent: "closed by Friday.", post: "", support: "I found 3 gaps this week.", stars: 5, date: "12 Aug 2026" },
-  { name: "Mira Vance", role: "Director", company: "Helix Fitness", initials: "MV", pre: "It reactivated ", accent: "212 lapsed members", post: " in one month.", support: "I approved every draft in about ten minutes.", stars: 5, date: "28 Jul 2026" },
-  { name: "Tom Ibrahim", role: "Founder", company: "Northside Coffee", initials: "TI", pre: "The weekly digest is ", accent: "the only report I read.", post: "", support: "It tells me who to talk to and what to say.", stars: 4, date: "03 Sep 2026" },
-  { name: "Grace Aduba", role: "Owner", company: "Bloom Florals", initials: "GA", pre: "Two campaigns, ", accent: "41 new orders", post: " before the weekend.", support: "I just approved what it drafted and watched.", stars: 5, date: "19 Aug 2026" },
-  { name: "Emeka Obi", role: "Founder", company: "Swift Errands", initials: "EO", pre: "It found ", accent: "a gap I never would have.", post: "", support: "Ranked page two in three weeks on that keyword.", stars: 5, date: "07 Sep 2026" },
+  { name: "Neighbourhood bakery", role: "Yaba, Lagos", company: "Illustrative example", initials: "BK", pre: "Groville spots that ", accent: "'bakery near me' is going to a competitor", post: ", and drafts an SEO article plus social posts to win it.", support: "You review every draft and approve what goes out." },
+  { name: "Fitness studio", role: "Lekki, Lagos", company: "Illustrative example", initials: "FT", pre: "It groups ", accent: "lapsed members", post: " and drafts a win-back campaign for each.", support: "Nothing sends until you approve it." },
+  { name: "Coffee shop", role: "Abuja", company: "Illustrative example", initials: "CF", pre: "The weekly digest names ", accent: "who to talk to and what to say", post: ", in plain language.", support: "You decide what gets sent." },
+  { name: "Florist", role: "Ikoyi, Lagos", company: "Illustrative example", initials: "FL", pre: "Two drafted campaigns aimed at ", accent: "weekend gift shoppers", post: ", ready for a weekend push.", support: "You approve the drafts, then watch the results." },
+  { name: "Logistics SME", role: "Ikeja, Lagos", company: "Illustrative example", initials: "LG", pre: "Groville spots that ", accent: "'same-day delivery Ikeja'", post: " is where competitors rank, and drafts an article plus three posts.", support: "You review and approve before anything goes out." },
 ];
-
-function Stars({ value }: { value: number }) {
-  return (
-    <span style={{ display: "flex", gap: 3, color: "var(--star)" }}>
-      {[0, 1, 2, 3, 4].map((i) => (
-        <Icons key={i} name="star-full" size={13} style={value - i >= 1 ? undefined : { opacity: 0.28 }} />
-      ))}
-    </span>
-  );
-}
 
 function VoiceCard({ v, pos }: { v: Voice; pos: string }) {
   return (
@@ -56,10 +44,6 @@ function VoiceCard({ v, pos }: { v: Voice; pos: string }) {
         {v.post}
       </blockquote>
       <p className="gv-voice-support">{v.support}</p>
-      <div className="gv-voice-foot">
-        <Stars value={v.stars} />
-        <span className="gv-voice-date">{v.date}</span>
-      </div>
     </article>
   );
 }
@@ -77,10 +61,10 @@ export function VoiceCarousel() {
   return (
     <Fragment>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 40, flexWrap: "wrap" }}>
-        <SectionHeader eyebrow="Customers" line1="Operators who" accent="stopped guessing." eyebrowStyle={{ background: "var(--tint)", color: "var(--primary)", boxShadow: "none" }} />
+        <SectionHeader eyebrow="Illustrative examples" line1="What a Groville" accent="draft looks like." eyebrowStyle={{ background: "var(--tint)", color: "var(--primary)", boxShadow: "none" }} />
         <div style={{ display: "flex", gap: 8, marginBottom: 56 }}>
-          <Button className="icon-btn" hierarchy="secondary gray" icon="only" iconName="chevron-left" aria-label="Previous testimonial" onClick={() => step(-1)} />
-          <Button className="icon-btn" hierarchy="secondary gray" icon="only" iconName="chevron-right" aria-label="Next testimonial" onClick={() => step(1)} />
+          <Button className="icon-btn" hierarchy="secondary gray" icon="only" iconName="chevron-left" aria-label="Previous example" onClick={() => step(-1)} />
+          <Button className="icon-btn" hierarchy="secondary gray" icon="only" iconName="chevron-right" aria-label="Next example" onClick={() => step(1)} />
         </div>
       </div>
       <div className="gv-voice-stage">

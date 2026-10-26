@@ -3,7 +3,7 @@
 import { Fragment, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 
 const BLUE_M = "#185DF1";
-const GREEN_M = "var(--success, #2BB673)";
+const GREEN_M = "var(--success)";
 const RM = typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 function useInView(): [React.RefObject<HTMLDivElement | null>, boolean] {
@@ -186,8 +186,8 @@ function MetricCard({
               gap: 5,
               fontSize: 11,
               color: GREEN_M,
-              background: "color-mix(in srgb, #2BB673 14%, transparent)",
-              border: "1px solid color-mix(in srgb, #2BB673 34%, transparent)",
+              background: "color-mix(in srgb, var(--success) 14%, transparent)",
+              border: "1px solid color-mix(in srgb, var(--success) 34%, transparent)",
               borderRadius: 8,
               padding: "4px 8px",
               whiteSpace: "nowrap",
@@ -206,8 +206,8 @@ function MetricCard({
 export function MetricCards() {
   return (
     <div className="gv-metric-grid">
-      <MetricCard index={0} label="Reach" target={1284} unit="search clicks" visual={<DotGrid />} description="Counted on the first scan, straight from your search data, with no set-up from you." />
-      <MetricCard index={1} label="Lift" target={18.4} decimals={1} unit="%" badge visual={<Sparkline />} description="Median reply rate across drafted campaigns in the last 90 days." />
+      <MetricCard index={0} label="Reach" target={1284} unit="search clicks" visual={<DotGrid />} description="Example search clicks Groville tracks once your site is connected." />
+      <MetricCard index={1} label="Lift" target={18.4} decimals={1} unit="%" badge visual={<Sparkline />} description="Example reply rate on a drafted campaign." />
       <MetricCard index={2} label="Time" target={9} unit="min" visual={<StepTimeline />} description="From connecting a data source to the first campaign ready to approve." />
     </div>
   );

@@ -5,7 +5,7 @@ import { Icons } from "@/components/ds";
 
 const P_STEPS: [string, string, string, string, string][] = [
   ["01", "Segment finder", "Lapsed, near-miss and high-value groups, named in plain language.", "logic", "Segments named"],
-  ["02", "Draft studio", "Copy, offer and timing per segment. Edit inline or send as written.", "builder", "Drafts written"],
+  ["02", "Draft studio", "Copy, offer and timing per segment. Edit inline or approve as written.", "builder", "Drafts written"],
   ["03", "Channel routing", "Each customer gets the channel they actually answer.", "routing", "Channel picked"],
   ["04", "Guardrails", "Send limits, quiet hours and approval rules you set once.", "shield", "Rules enforced"],
   ["05", "Live telemetry", "Opens, replies and revenue tracked per campaign.", "telemetry", "Results tracked"],

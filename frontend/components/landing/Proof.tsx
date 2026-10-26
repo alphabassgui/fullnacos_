@@ -98,11 +98,11 @@ export function Proof() {
     <div className="gv-pf">
       <span className="gv-pf-glow" aria-hidden="true" />
       <div className="gv-pf-head">
-        <span className="gv-pf-chip-eyebrow">Real result</span>
+        <span className="gv-pf-chip-eyebrow">Example walkthrough</span>
         <h2 className="gv-pf-h2">
           Watch one gap turn into <em className="gv-pf-accent">page one</em>.
         </h2>
-        <p className="gv-pf-lede">Here is one opportunity Groville found for a Lagos bakery, and what happened in the month after the owner approved the campaign.</p>
+        <p className="gv-pf-lede">Here is how one opportunity Groville finds for a Lagos bakery plays out, from the gap to the campaign you approve.</p>
       </div>
 
       <div className={"gv-pf-stage" + (live ? " is-in" : "")} ref={stage}>
@@ -147,7 +147,7 @@ export function Proof() {
             <div className="gv-pf-shop">
               <span className="gv-pf-rank">{rank}</span>
               <span className="gv-pf-shop-txt">
-                <span className="gv-pf-shop-t">Ada&apos;s Bakery — cake delivery across Lagos</span>
+                <span className="gv-pf-shop-t">Ada&apos;s Bakery · cake delivery across Lagos</span>
                 <span className="gv-pf-shop-u">adasbakery.com/cake-delivery</span>
               </span>
               <span className="gv-pf-here">You&apos;re here now</span>
