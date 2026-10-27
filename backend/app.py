@@ -75,6 +75,33 @@ app.config.update(
 )
 
 
+# SQLAlchemy / Flask-Migrate wiring. Firestore remains the live database; this
+# only prepares the Postgres (Supabase) stack for later, table-by-table slices.
+# Guarded on DATABASE_URL so local/legacy runs without it still boot.
+import logging
+from sqlalchemy.pool import NullPool
+from extensions import db, migrate
+
+database_url = os.getenv("DATABASE_URL")
+if database_url:
+    app.config["SQLALCHEMY_DATABASE_URI"] = database_url
+    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+    # DATABASE_URL points at the Supabase TRANSACTION pooler (pgBouncer, port
+    # 6543). In transaction mode pgBouncer hands each transaction a different
+    # backend, so we must not keep a client-side server-bound pool: NullPool
+    # opens and closes a connection per checkout. psycopg2 does not use
+    # server-side prepared statements by default, so it is safe here; do NOT
+    # add prepare_threshold — that is a psycopg3-only option and psycopg2 would
+    # reject it. Alembic migrations run against the DIRECT connection (port
+    # 5432), not this pooler (see migrations/env.py).
+    app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"poolclass": NullPool}
+    db.init_app(app)
+    migrate.init_app(app, db)
+else:
+    logging.getLogger(__name__).warning(
+        "DATABASE_URL unset — skipping SQLAlchemy/Migrate init (DB-less boot)."
+    )
+
 
 # Register blueprints
 app.register_blueprint(auth_bp)

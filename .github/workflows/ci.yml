@@ -10,6 +10,23 @@ jobs:
   backend:
     name: backend (pytest)
     runs-on: ubuntu-latest
+    # Disposable Postgres for the Supabase-foundation test harness. This is a
+    # throwaway CI database (NOT prod Supabase); superuser is available so we can
+    # enable extensions and apply migrations against it.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: groville_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -61,15 +78,43 @@ jobs:
               f.write(f"FIREBASE_CREDENTIALS={path}\n")
           PY
 
+      # Enable the Postgres extensions the later migration slices will rely on.
+      # psql ships on the GitHub ubuntu runner; superuser is available on this
+      # throwaway CI database.
+      - name: Enable Postgres extensions
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d groville_test \
+            -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;" \
+            -c "CREATE EXTENSION IF NOT EXISTS citext;"
+
+      # Prove the Alembic scaffold applies cleanly against real Postgres. The
+      # baseline migration is empty (no models yet), so this just creates the
+      # alembic_version table. Alembic uses the DIRECT connection (see
+      # migrations/env.py); the CI service has no pgBouncer pooler.
+      - name: Apply database migrations
+        working-directory: backend
+        env:
+          FLASK_APP: app
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/groville_test
+          GROQ_API_KEY: test-groq-api-key
+          SECRET_KEY: ci-dummy-secret-key
+          TOKEN_ENCRYPTION_KEY: vSiYSo9eqy4MSVZNb3O7yNsqP2n0fWx6a6WFxwfnA-U=
+        run: python -m flask db upgrade
+
       # SECRET_KEY and TOKEN_ENCRYPTION_KEY are read from the environment by the
       # app/services (the maintainer's local run gets them from backend/.env).
       # These are throwaway, non-secret CI values; TOKEN_ENCRYPTION_KEY is a valid Fernet key.
+      # TEST_DATABASE_URL points pytest's Postgres harness at the throwaway CI
+      # database (never prod Supabase).
       - name: Run tests
         working-directory: backend
         env:
           GROQ_API_KEY: test-groq-api-key
           SECRET_KEY: ci-dummy-secret-key
           TOKEN_ENCRYPTION_KEY: vSiYSo9eqy4MSVZNb3O7yNsqP2n0fWx6a6WFxwfnA-U=
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/groville_test
         run: python -m pytest tests/
 
   frontend:
