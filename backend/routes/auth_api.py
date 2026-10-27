@@ -3,12 +3,15 @@ from datetime import datetime, timedelta
 
 from flask import Blueprint, current_app, jsonify, request, session
 from google.cloud.firestore_v1.base_query import FieldFilter
+from sqlalchemy.exc import IntegrityError
 from werkzeug.security import check_password_hash, generate_password_hash
 
 import routes.auth as auth
 import services.connection_service as connection_service
 import services.tile_storage_service as tile_storage_service
+from extensions import db as orm_db
 from firebase import db
+from models import User
 
 api_auth_bp = Blueprint("api_auth", __name__)
 
@@ -66,34 +69,34 @@ def api_register():
         if not auth.check_registration_limit(ip):
             return jsonify({"success": False, "error": "Too many registrations from this IP. Try again later."}), 429
 
-        existing = db.collection("users").where(filter=FieldFilter("email", "==", email)).limit(1).get()
-        if existing:
+        # Email uniqueness is enforced by the Postgres UNIQUE(email) constraint;
+        # a duplicate raises IntegrityError on commit.
+        user = User(
+            username=username,
+            email=email,
+            role="user",
+            password_hash=generate_password_hash(password),
+            bound_device_id=None,
+            subscription_status=False,
+            subscription_expiry=None,
+            status="Active",
+            has_completed_tour=False,
+            has_completed_onboarding=False,
+            last_login=None,
+        )
+        orm_db.session.add(user)
+        try:
+            orm_db.session.commit()
+        except IntegrityError:
+            orm_db.session.rollback()
             return jsonify({"success": False, "error": "Email already registered. Please login or use another email."}), 409
-
-        user_data = {
-            "username": username,
-            "email": email,
-            "role": "user",
-            "password_hash": generate_password_hash(password),
-            "active_session_tokens": [],
-            "bound_device_id": None,
-            "subscription_status": False,
-            "subscription_expiry": None,
-            "status": "Active",
-            "has_completed_tour": False,
-            "has_completed_onboarding": False,
-            "created_at": datetime.utcnow().isoformat(),
-            "last_login": None,
-        }
-
-        uid, error = auth.create_firebase_user_and_firestore(email, password, user_data)
-        if error is not None:
-            if "already registered" in error.lower():
-                return jsonify({"success": False, "error": "Email already registered. Please login or use another email."}), 409
+        except Exception as exc:
+            orm_db.session.rollback()
+            current_app.logger.error(f"API register error: {exc}")
             return jsonify({"success": False, "error": "Registration failed. Try again later."}), 500
 
         auth.log_registration(ip)
-        return jsonify({"success": True, "user_id": uid}), 201
+        return jsonify({"success": True, "user_id": str(user.id)}), 201
     except Exception as exc:
         current_app.logger.error(f"API register error: {exc}")
         return jsonify({"success": False, "error": "Internal server error."}), 500
@@ -121,46 +124,42 @@ def api_login():
         if not email or not password:
             return jsonify({"success": False, "error": "All fields are required."}), 400
 
-        users = db.collection("users").where(filter=FieldFilter("email", "==", email)).limit(1).stream()
-        user_doc = next(users, None)
-        if not user_doc:
+        user = orm_db.session.query(User).filter(User.email == email).first()
+        if not user:
             auth._increment_attempts(ip)
             return jsonify({"success": False, "error": "Invalid credentials."}), 401
 
-        user = user_doc.to_dict()
-
-        if not check_password_hash(user.get("password_hash", ""), password):
+        if not check_password_hash(user.password_hash or "", password):
             auth._increment_attempts(ip)
             return jsonify({"success": False, "error": "Invalid credentials."}), 401
 
-        if user.get("status") == "Disabled":
+        if user.status == "Disabled":
             return jsonify({"success": False, "error": "Account disabled. Contact support."}), 403
 
+        user_id = str(user.id)
         new_session_token = secrets.token_hex(64)
 
-        # ADD the new token to the user's valid-token set (migrating a legacy
-        # single token if present) so other devices stay logged in.
-        db.collection("users").document(user_doc.id).update({
-            "active_session_tokens": auth.merge_session_token(user, new_session_token),
-            "last_login": datetime.utcnow().isoformat(),
-            "last_ip": ip,
-        })
+        # INSERT a new session row so other devices stay logged in.
+        auth.create_session(user_id, new_session_token, None)
+        user.last_login = datetime.utcnow()
+        user.last_ip = ip
+        orm_db.session.commit()
         auth._reset_attempts(ip)
 
         session.clear()
         session.permanent = True
         current_app.permanent_session_lifetime = timedelta(minutes=30)
 
-        session["user_id"] = user_doc.id
+        session["user_id"] = user_id
         session["email"] = email
-        session["role"] = user.get("role", "user")
+        session["role"] = user.role or "user"
         session["session_token"] = new_session_token
 
         return jsonify({
             "success": True,
-            "user_id": user_doc.id,
+            "user_id": user_id,
             "email": email,
-            "role": user.get("role", "user"),
+            "role": user.role or "user",
         }), 200
     except Exception as exc:
         current_app.logger.error(f"API login error: {exc}")
@@ -173,7 +172,7 @@ def api_logout():
         user_id = session.get("user_id")
         if user_id:
             # Revoke only THIS device's token → other devices stay logged in.
-            auth.remove_session_token(user_id, session.get("session_token"))
+            auth.remove_session_token(session.get("session_token"))
         session.clear()
         return jsonify({"success": True, "message": "Logged out."}), 200
     except Exception as exc:
@@ -188,30 +187,28 @@ def api_me():
         if not user_id:
             return jsonify({"success": False, "error": "Authentication required"}), 401
 
-        user_doc = db.collection("users").document(user_id).get()
-        if not user_doc.exists:
+        user = orm_db.session.get(User, user_id)
+        if user is None:
             session.clear()
             return jsonify({"success": False, "error": "Authentication required"}), 401
 
-        user = user_doc.to_dict()
         return jsonify({
             "success": True,
             "user": {
-                "id": user_doc.id,
-                "username": user.get("username"),
-                "email": user.get("email"),
-                "role": user.get("role"),
-                "status": user.get("status"),
-                # Source of truth for the one-time product tour. Defaults False for
-                # users created before this field existed, so they still see it once.
-                "has_completed_tour": user.get("has_completed_tour", False),
+                "id": user_id,
+                "username": user.username,
+                "email": user.email,
+                "role": user.role,
+                "status": user.status,
+                # Source of truth for the one-time product tour.
+                "has_completed_tour": user.has_completed_tour,
                 # Source of truth for onboarding completion (post-payment routing).
                 # HYBRID: the stored flag OR durable evidence (a business with a
                 # completed analysis run), so legacy users who onboarded before this
                 # field existed are recognised instead of re-sent through the funnel.
                 # `or` short-circuits, so the derive only runs when the flag is False.
-                "has_completed_onboarding": bool(user.get("has_completed_onboarding", False))
-                or _has_onboarding_evidence(user_doc.id),
+                "has_completed_onboarding": bool(user.has_completed_onboarding)
+                or _has_onboarding_evidence(user_id),
             },
         }), 200
     except Exception as exc:
@@ -229,12 +226,13 @@ def api_tour_complete():
         if not user_id:
             return jsonify({"success": False, "error": "Authentication required"}), 401
 
-        user_ref = db.collection("users").document(user_id)
-        if not user_ref.get().exists:
+        user = orm_db.session.get(User, user_id)
+        if user is None:
             session.clear()
             return jsonify({"success": False, "error": "Authentication required"}), 401
 
-        user_ref.update({"has_completed_tour": True})
+        user.has_completed_tour = True
+        orm_db.session.commit()
         return jsonify({"success": True}), 200
     except Exception as exc:
         current_app.logger.error(f"API tour complete error: {exc}")
@@ -251,12 +249,13 @@ def api_onboarding_complete():
         if not user_id:
             return jsonify({"success": False, "error": "Authentication required"}), 401
 
-        user_ref = db.collection("users").document(user_id)
-        if not user_ref.get().exists:
+        user = orm_db.session.get(User, user_id)
+        if user is None:
             session.clear()
             return jsonify({"success": False, "error": "Authentication required"}), 401
 
-        user_ref.update({"has_completed_onboarding": True})
+        user.has_completed_onboarding = True
+        orm_db.session.commit()
         return jsonify({"success": True}), 200
     except Exception as exc:
         current_app.logger.error(f"API onboarding complete error: {exc}")
@@ -313,16 +312,15 @@ def api_delete_account():
         if not user_id:
             return jsonify({"success": False, "error": "Authentication required"}), 401
 
-        user_ref = db.collection("users").document(user_id)
-        user_doc = user_ref.get()
-        if not user_doc.exists:
+        user = orm_db.session.get(User, user_id)
+        if user is None:
             session.clear()
             return jsonify({"success": False, "error": "User not found"}), 404
 
         # ── Irreversibility gate: re-verify the typed email server-side ──
         data = request.get_json(silent=True) or {}
         confirm_email = (data.get("confirm_email") or "").strip().lower()
-        stored_email = (user_doc.to_dict() or {}).get("email")
+        stored_email = (user.email or "").lower()
         if not confirm_email or confirm_email != stored_email:
             return jsonify({
                 "success": False,
@@ -349,29 +347,19 @@ def api_delete_account():
                 )
             db.recursive_delete(db.collection("businesses").document(business_id))
 
-        # ── Per-user student profile (may not exist) ──
+        # ── Per-user student profile (stays on Firestore this slice) ──
         profile_ref = db.collection("student_profiles").document(user_id)
         if profile_ref.get().exists:
             profile_ref.delete()
 
-        # ── The user's own security_logs entries (top-level, not cascaded) ──
-        security_logs = (
-            db.collection("security_logs")
-            .where(filter=FieldFilter("user_id", "==", user_id))
-            .stream()
-        )
-        for log_doc in security_logs:
-            db.collection("security_logs").document(log_doc.id).delete()
-
-        # ── Finally the user doc itself, then drop the session ──
-        user_ref.delete()
-
-        # ── Remove the Firebase Auth record too, so the email can re-register.
-        #    Best-effort (helper never raises): cannot change the 200 response. ──
-        auth.delete_firebase_user(user_id)
+        # ── Finally the user row itself — the FK ON DELETE CASCADE removes the
+        #    user's user_sessions and security_logs rows. Then drop the session. ──
+        orm_db.session.delete(user)
+        orm_db.session.commit()
         session.clear()
 
         return jsonify({"success": True, "message": "Account deleted"}), 200
     except Exception as exc:
+        orm_db.session.rollback()
         current_app.logger.error(f"API delete account error: {exc}")
         return jsonify({"success": False, "error": "Internal server error."}), 500

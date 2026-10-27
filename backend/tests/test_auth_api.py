@@ -1,8 +1,14 @@
-import types
+import itertools as _itertools
+import uuid
 
 import pytest
-from firebase_admin.auth import UserNotFoundError
 from werkzeug.security import check_password_hash, generate_password_hash
+
+from models import SecurityLog, User, UserSession
+
+# A syntactically valid UUID that is never seeded — used for the "unknown user"
+# paths, where a non-UUID string would fail to bind and surface as a 500.
+ABSENT_UUID = "00000000-0000-0000-0000-000000000000"
 
 
 @pytest.fixture
@@ -24,6 +30,13 @@ def clean_auth_state(monkeypatch):
     routes_auth.login_attempts.clear()
     routes_auth.locked_ips.clear()
     routes_auth.registration_log.clear()
+
+
+# ──────────────────────────────────────────────
+# Fake Firestore for the collections that STAY on Firestore this slice
+# (student_profiles routing, businesses/agent_runs onboarding evidence).
+# Users / sessions / security_logs now live in Postgres (the db_session fixture).
+# ──────────────────────────────────────────────
 
 
 class AuthSnapshot:
@@ -124,46 +137,68 @@ class AuthDb:
 
 
 @pytest.fixture
-def fake_firebase(monkeypatch):
-    import decorators
+def fs(monkeypatch):
+    """Patch the Firestore handle used by the routes that still read Firestore
+    (login's student_profiles lookup, /me onboarding evidence)."""
     import routes.auth as routes_auth
     import routes.auth_api as auth_api
 
     db = AuthDb()
     monkeypatch.setattr(routes_auth, "db", db)
     monkeypatch.setattr(auth_api, "db", db)
-    monkeypatch.setattr(decorators, "db", db)
+    return db
 
-    def raise_not_found(email):
-        raise UserNotFoundError(email)
 
-    monkeypatch.setattr(routes_auth.admin_auth, "get_user_by_email", raise_not_found)
-    monkeypatch.setattr(
-        routes_auth.admin_auth,
-        "create_user",
-        lambda **kwargs: types.SimpleNamespace(uid="firebase-uid-1"),
+# ──────────────────────────────────────────────
+# Postgres seed helpers (operate on the transactional db_session fixture).
+# ──────────────────────────────────────────────
+
+
+def seed_user(db_session, email="alice@example.com", password="password123",
+              username="Alice", role="user", status="Active", **overrides):
+    fields = dict(
+        email=email,
+        username=username,
+        role=role,
+        status=status,
+        password_hash=generate_password_hash(password) if password else None,
     )
-    return db, routes_auth, auth_api
+    fields.update(overrides)
+    user = User(**fields)
+    db_session.add(user)
+    db_session.commit()
+    return user
 
 
-def seed_users(db, rows):
-    users = db.collection("users")
-    for uid, data in rows.items():
-        users.document(uid).set(data)
+def seed_session(db_session, user_id, token, device_id=None):
+    db_session.add(UserSession(token=token, user_id=user_id, device_id=device_id))
+    db_session.commit()
 
 
 def post_json(client, path, body, ip):
     return client.post(path, json=body, headers={"X-Forwarded-For": ip})
 
 
+# ══════════════════════════════════════════════
+# Blueprint registration (no DB)
+# ══════════════════════════════════════════════
+
 def test_register_blueprint_registered(flask_app):
     rules = {r.rule for r in flask_app.url_map.iter_rules()}
     assert "/api/auth/register" in rules
 
 
-def test_register_creates_user(fake_firebase, client):
-    db, routes_auth, auth_api = fake_firebase
+def test_api_auth_blueprint_registered(flask_app):
+    rules = {r.rule for r in flask_app.url_map.iter_rules()}
+    for rule in ("/api/auth/register", "/api/auth/login", "/api/auth/logout", "/api/auth/me"):
+        assert rule in rules
 
+
+# ══════════════════════════════════════════════
+# Register
+# ══════════════════════════════════════════════
+
+def test_register_creates_user(db_session, client):
     resp = post_json(client, "/api/auth/register", {
         "username": "Alice",
         "email": "Alice@Example.com",
@@ -173,26 +208,27 @@ def test_register_creates_user(fake_firebase, client):
     assert resp.status_code == 201
     body = resp.get_json()
     assert body["success"] is True
-    assert body["user_id"] == "firebase-uid-1"
+    # The id is now a DB-generated UUID, returned as a string.
+    uuid.UUID(body["user_id"])
 
-    ref = db.collection("users").document("firebase-uid-1")
-    assert ref.data["email"] == "alice@example.com"
-    assert ref.data["username"] == "Alice"
-    assert ref.data["role"] == "user"
-    assert ref.data["status"] == "Active"
-    assert ref.data["has_completed_onboarding"] is False
-    assert ref.data["password_hash"] != "password123"
-    assert check_password_hash(ref.data["password_hash"], "password123") is True
+    user = db_session.query(User).filter(User.email == "alice@example.com").one()
+    assert str(user.id) == body["user_id"]
+    assert user.username == "Alice"
+    assert user.role == "user"
+    assert user.status == "Active"
+    assert user.has_completed_onboarding is False
+    assert user.password_hash != "password123"
+    assert check_password_hash(user.password_hash, "password123") is True
 
 
-def test_register_missing_fields(fake_firebase, client):
+def test_register_missing_fields(client):
     for body in ({}, {"username": "A", "password": "password123"}, {"username": "A", "email": "a@b.co"}):
         resp = post_json(client, "/api/auth/register", body, "10.0.0.2")
         assert resp.status_code == 400
         assert resp.get_json()["error"] == "All fields are required."
 
 
-def test_register_short_password(fake_firebase, client):
+def test_register_short_password(client):
     resp = post_json(client, "/api/auth/register", {
         "username": "Bob",
         "email": "bob@example.com",
@@ -202,149 +238,24 @@ def test_register_short_password(fake_firebase, client):
     assert resp.get_json()["error"] == "Password must be at least 8 characters."
 
 
-def test_register_duplicate_email(fake_firebase, client):
-    db, routes_auth, auth_api = fake_firebase
-    seed_users(db, {"u-used": {"email": "used@example.com", "username": "Used"}})
+def test_register_duplicate_email(db_session, client):
+    # The UNIQUE(email) constraint (citext, case-insensitive) rejects the
+    # duplicate on commit → IntegrityError → the same 409 response.
+    seed_user(db_session, email="used@example.com", username="Used")
 
     resp = post_json(client, "/api/auth/register", {
         "username": "Dup",
-        "email": "used@example.com",
+        "email": "Used@Example.com",
         "password": "password123",
     }, "10.0.0.4")
 
     assert resp.status_code == 409
     assert resp.get_json()["error"] == "Email already registered. Please login or use another email."
-    assert "firebase-uid-1" not in db._store
+    # No second row was created.
+    assert db_session.query(User).filter(User.email == "used@example.com").count() == 1
 
 
-def _stub_auth_record(monkeypatch, routes_auth, uid="orphan-uid"):
-    """Make Firebase Auth report an existing record; capture delete_user calls."""
-    deleted = []
-    monkeypatch.setattr(
-        routes_auth.admin_auth, "get_user_by_email",
-        lambda email: types.SimpleNamespace(uid=uid),
-    )
-    monkeypatch.setattr(routes_auth.admin_auth, "delete_user", deleted.append)
-    return deleted
-
-
-def test_register_self_heals_orphan_auth_record(fake_firebase, client, monkeypatch):
-    db, routes_auth, auth_api = fake_firebase
-    deleted = _stub_auth_record(monkeypatch, routes_auth)
-    created = []
-    monkeypatch.setattr(
-        routes_auth.admin_auth, "create_user",
-        lambda **kw: created.append(kw) or types.SimpleNamespace(uid="firebase-uid-1"),
-    )
-
-    resp = post_json(client, "/api/auth/register", {
-        "username": "Back", "email": "back@example.com", "password": "password123",
-    }, "10.0.0.20")
-
-    assert resp.status_code == 201
-    assert deleted == ["orphan-uid"]
-    assert len(created) == 1
-    assert db.collection("users").document("firebase-uid-1").data["email"] == "back@example.com"
-
-
-def test_register_real_duplicate_never_deletes_auth_record(fake_firebase, monkeypatch):
-    # Helper-level: an Auth record with a live Firestore user (by email) is a
-    # genuine duplicate and must NOT be deleted.
-    db, routes_auth, auth_api = fake_firebase
-    deleted = _stub_auth_record(monkeypatch, routes_auth, uid="live-uid")
-    seed_users(db, {"live-uid": {"email": "live@example.com"}})
-
-    uid, error = routes_auth.create_firebase_user_and_firestore("live@example.com", "password123", {})
-
-    assert uid is None
-    assert "already registered" in error.lower()
-    assert deleted == []
-
-
-def test_register_duplicate_via_api_with_auth_record_returns_409(fake_firebase, client, monkeypatch):
-    db, routes_auth, auth_api = fake_firebase
-    deleted = _stub_auth_record(monkeypatch, routes_auth, uid="live-uid")
-    seed_users(db, {"live-uid": {"email": "live@example.com"}})
-
-    resp = post_json(client, "/api/auth/register", {
-        "username": "Dup", "email": "live@example.com", "password": "password123",
-    }, "10.0.0.21")
-
-    assert resp.status_code == 409
-    assert "already registered" in resp.get_json()["error"].lower()
-    assert deleted == []
-
-
-def test_register_auth_record_with_live_uid_doc_is_not_deleted(fake_firebase, monkeypatch):
-    # Firestore doc exists under the Auth uid but its email field differs/missing:
-    # still a live account, never deleted.
-    db, routes_auth, auth_api = fake_firebase
-    deleted = _stub_auth_record(monkeypatch, routes_auth, uid="live-uid")
-    seed_users(db, {"live-uid": {"username": "NoEmail"}})
-
-    uid, error = routes_auth.create_firebase_user_and_firestore("x@example.com", "password123", {})
-
-    assert uid is None
-    assert "already registered" in error.lower()
-    assert deleted == []
-
-
-def test_register_orphan_delete_failure_returns_error_without_create(fake_firebase, monkeypatch):
-    db, routes_auth, auth_api = fake_firebase
-    _stub_auth_record(monkeypatch, routes_auth)
-
-    def boom(uid):
-        raise RuntimeError("firebase down")
-
-    monkeypatch.setattr(routes_auth.admin_auth, "delete_user", boom)
-    created = []
-    monkeypatch.setattr(
-        routes_auth.admin_auth, "create_user",
-        lambda **kw: created.append(kw) or types.SimpleNamespace(uid="firebase-uid-1"),
-    )
-
-    uid, error = routes_auth.create_firebase_user_and_firestore("o@example.com", "password123", {})
-
-    assert uid is None and error
-    assert created == []
-
-
-def test_register_rolls_back_auth_user_when_firestore_write_fails(fake_firebase, client, monkeypatch):
-    db, routes_auth, auth_api = fake_firebase
-    deleted = []
-    monkeypatch.setattr(routes_auth.admin_auth, "delete_user", deleted.append)
-
-    def failing_set(self, data):
-        raise RuntimeError("firestore down")
-
-    monkeypatch.setattr(type(db.collection("users").document("x")), "set", failing_set)
-
-    resp = post_json(client, "/api/auth/register", {
-        "username": "Roll", "email": "roll@example.com", "password": "password123",
-    }, "10.0.0.22")
-
-    assert resp.status_code == 500
-    assert deleted == ["firebase-uid-1"]
-    assert ("users", "firebase-uid-1") not in db._store
-
-
-def test_delete_firebase_user_is_best_effort(fake_firebase, monkeypatch):
-    db, routes_auth, auth_api = fake_firebase
-
-    def boom(uid):
-        raise RuntimeError("firebase down")
-
-    monkeypatch.setattr(routes_auth.admin_auth, "delete_user", boom)
-    assert routes_auth.delete_firebase_user("u1") is False
-
-    def gone(uid):
-        raise UserNotFoundError(uid)
-
-    monkeypatch.setattr(routes_auth.admin_auth, "delete_user", gone)
-    assert routes_auth.delete_firebase_user("u1") is True
-
-
-def test_register_rate_limit(fake_firebase, client):
+def test_register_rate_limit(db_session, client):
     ip = "10.0.0.9"
     for i in range(3):
         resp = post_json(client, "/api/auth/register", {
@@ -358,13 +269,13 @@ def test_register_rate_limit(fake_firebase, client):
     assert resp.get_json()["error"] == "Too many registrations from this IP. Try again later."
 
 
-def test_register_500_on_unexpected_error(fake_firebase, client, monkeypatch):
-    db, routes_auth, auth_api = fake_firebase
+def test_register_500_on_unexpected_error(client, monkeypatch):
+    import routes.auth_api as auth_api
 
-    def boom(email, password, user_data):
-        raise RuntimeError("firebase down")
+    def boom(ip):
+        raise RuntimeError("limiter down")
 
-    monkeypatch.setattr(routes_auth, "create_firebase_user_and_firestore", boom)
+    monkeypatch.setattr(auth_api.auth, "check_registration_limit", boom)
 
     resp = post_json(client, "/api/auth/register", {
         "username": "C",
@@ -376,14 +287,13 @@ def test_register_500_on_unexpected_error(fake_firebase, client, monkeypatch):
     assert resp.get_json()["success"] is False
 
 
-def test_login_success_sets_session(fake_firebase, client):
-    db, routes_auth, auth_api = fake_firebase
-    seed_users(db, {
-        "u1": {
-            "username": "Alice", "email": "alice@example.com", "role": "user", "status": "Active",
-            "password_hash": generate_password_hash("password123"),
-        },
-    })
+# ══════════════════════════════════════════════
+# Login — sessions now live in user_sessions (one row per device)
+# ══════════════════════════════════════════════
+
+def test_login_success_sets_session(db_session, client):
+    user = seed_user(db_session)
+    uid = str(user.id)
 
     resp = post_json(client, "/api/auth/login", {
         "email": "alice@example.com", "password": "password123",
@@ -391,57 +301,52 @@ def test_login_success_sets_session(fake_firebase, client):
 
     assert resp.status_code == 200
     assert resp.get_json() == {
-        "success": True, "user_id": "u1", "email": "alice@example.com", "role": "user",
+        "success": True, "user_id": uid, "email": "alice@example.com", "role": "user",
     }
 
     with client.session_transaction() as sess:
-        assert sess["user_id"] == "u1"
+        assert sess["user_id"] == uid
         assert sess["email"] == "alice@example.com"
         assert sess["role"] == "user"
         token = sess["session_token"]
     assert len(token) == 128
-    # Token is ADDED to the per-user valid-token set.
-    assert token in db.collection("users").document("u1").data["active_session_tokens"]
+    # A user_sessions row was INSERTed for this device.
+    row = db_session.query(UserSession).filter_by(token=token).one()
+    assert str(row.user_id) == uid
 
 
-def test_second_login_does_not_invalidate_first(fake_firebase, client):
-    # Core regression: logging in a second time must NOT drop the first token —
-    # both devices' tokens stay valid in the set.
-    db, routes_auth, auth_api = fake_firebase
-    seed_users(db, {
-        "u1": {
-            "username": "Alice", "email": "alice@example.com", "role": "user", "status": "Active",
-            "password_hash": generate_password_hash("password123"),
-        },
-    })
+def test_second_login_does_not_invalidate_first(db_session, client):
+    # Core regression: a second login must NOT drop the first device's row —
+    # both user_sessions rows stay valid.
+    user = seed_user(db_session)
+    uid = str(user.id)
 
     resp1 = post_json(client, "/api/auth/login", {
         "email": "alice@example.com", "password": "password123",
     }, "5.6.7.8")
     assert resp1.status_code == 200
-    tokens_after_first = list(db.collection("users").document("u1").data["active_session_tokens"])
-    assert len(tokens_after_first) == 1
-    token1 = tokens_after_first[0]
+    with client.session_transaction() as sess:
+        token1 = sess["session_token"]
 
     resp2 = post_json(client, "/api/auth/login", {
         "email": "alice@example.com", "password": "password123",
     }, "9.8.7.6")
     assert resp2.status_code == 200
-    tokens_after_second = db.collection("users").document("u1").data["active_session_tokens"]
+    with client.session_transaction() as sess:
+        token2 = sess["session_token"]
 
-    # Both the first and the newly-minted token are present.
-    assert token1 in tokens_after_second
-    assert len(tokens_after_second) == 2
-    token2 = next(t for t in tokens_after_second if t != token1)
-    assert token2 != token1
+    assert token1 != token2
+    tokens = {
+        t for (t,) in db_session.query(UserSession.token).filter_by(user_id=uid).all()
+    }
+    assert token1 in tokens
+    assert token2 in tokens
+    assert len(tokens) == 2
 
 
-def test_login_wrong_password_increments_attempts(fake_firebase, client):
-    db, routes_auth, auth_api = fake_firebase
-    seed_users(db, {"u1": {
-        "email": "alice@example.com", "status": "Active",
-        "password_hash": generate_password_hash("password123"),
-    }})
+def test_login_wrong_password_increments_attempts(db_session, client):
+    import routes.auth as routes_auth
+    seed_user(db_session)
 
     resp = post_json(client, "/api/auth/login", {
         "email": "alice@example.com", "password": "wrongpass",
@@ -452,8 +357,8 @@ def test_login_wrong_password_increments_attempts(fake_firebase, client):
     assert routes_auth.login_attempts.get("5.6.7.9", 0) == 1
 
 
-def test_login_unknown_email_returns_401(fake_firebase, client):
-    db, routes_auth, auth_api = fake_firebase
+def test_login_unknown_email_returns_401(db_session, client):
+    import routes.auth as routes_auth
 
     resp = post_json(client, "/api/auth/login", {
         "email": "nobody@example.com", "password": "password123",
@@ -464,12 +369,8 @@ def test_login_unknown_email_returns_401(fake_firebase, client):
     assert routes_auth.login_attempts.get("5.6.7.10", 0) == 1
 
 
-def test_login_disabled_user_returns_403(fake_firebase, client):
-    db, routes_auth, auth_api = fake_firebase
-    seed_users(db, {"u2": {
-        "email": "bob@example.com", "status": "Disabled",
-        "password_hash": generate_password_hash("password123"),
-    }})
+def test_login_disabled_user_returns_403(db_session, client):
+    seed_user(db_session, email="bob@example.com", status="Disabled")
 
     resp = post_json(client, "/api/auth/login", {
         "email": "bob@example.com", "password": "password123",
@@ -479,12 +380,8 @@ def test_login_disabled_user_returns_403(fake_firebase, client):
     assert resp.get_json()["error"] == "Account disabled. Contact support."
 
 
-def test_login_ip_locked_out_returns_423(fake_firebase, client):
-    db, routes_auth, auth_api = fake_firebase
-    seed_users(db, {"u1": {
-        "email": "alice@example.com", "status": "Active",
-        "password_hash": generate_password_hash("password123"),
-    }})
+def test_login_ip_locked_out_returns_423(db_session, client):
+    seed_user(db_session)
 
     body = {"email": "alice@example.com", "password": "wrongpass"}
     for _ in range(5):
@@ -496,47 +393,47 @@ def test_login_ip_locked_out_returns_423(fake_firebase, client):
     assert "Too many failed attempts. Try again in" in resp.get_json()["error"]
 
 
-def test_api_auth_blueprint_registered(flask_app):
-    rules = {r.rule for r in flask_app.url_map.iter_rules()}
-    for rule in ("/api/auth/register", "/api/auth/login", "/api/auth/logout", "/api/auth/me"):
-        assert rule in rules
+# ══════════════════════════════════════════════
+# Logout — deletes only the current device's row
+# ══════════════════════════════════════════════
 
-
-def test_logout_removes_only_current_token(fake_firebase, client):
-    # Logging out device A removes only A's token; device B's token stays valid.
-    db, routes_auth, auth_api = fake_firebase
-    seed_users(db, {"u1": {
-        "username": "Alice", "email": "alice@example.com", "role": "user", "status": "Active",
-        "password_hash": generate_password_hash("password123"),
-        "active_session_tokens": ["tok-A", "tok-B"],
-    }})
+def test_logout_removes_only_current_token(db_session, client):
+    user = seed_user(db_session)
+    uid = str(user.id)
+    seed_session(db_session, uid, "tok-A")
+    seed_session(db_session, uid, "tok-B")
     with client.session_transaction() as sess:
-        sess["user_id"] = "u1"
+        sess["user_id"] = uid
         sess["session_token"] = "tok-A"
 
     resp = client.post("/api/auth/logout")
     assert resp.status_code == 200
     assert resp.get_json() == {"success": True, "message": "Logged out."}
 
-    assert db.collection("users").document("u1").data["active_session_tokens"] == ["tok-B"]
+    remaining = {
+        t for (t,) in db_session.query(UserSession.token).filter_by(user_id=uid).all()
+    }
+    assert remaining == {"tok-B"}
     with client.session_transaction() as sess:
         assert "user_id" not in sess
 
 
-def test_me_returns_logged_in_user(fake_firebase, client):
-    db, routes_auth, auth_api = fake_firebase
-    seed_users(db, {"u1": {
-        "username": "Alice", "email": "alice@example.com", "role": "user", "status": "Active",
-    }})
+# ══════════════════════════════════════════════
+# /me
+# ══════════════════════════════════════════════
+
+def test_me_returns_logged_in_user(db_session, fs, client):
+    user = seed_user(db_session)
+    uid = str(user.id)
     with client.session_transaction() as sess:
-        sess["user_id"] = "u1"
+        sess["user_id"] = uid
 
     resp = client.get("/api/auth/me")
     assert resp.status_code == 200
     assert resp.get_json() == {
         "success": True,
         "user": {
-            "id": "u1",
+            "id": uid,
             "username": "Alice",
             "email": "alice@example.com",
             "role": "user",
@@ -547,104 +444,48 @@ def test_me_returns_logged_in_user(fake_firebase, client):
     }
 
 
-def test_me_returns_onboarding_flag_true(fake_firebase, client):
-    db, routes_auth, auth_api = fake_firebase
-    seed_users(db, {"u1": {
-        "username": "Alice", "email": "alice@example.com", "role": "user", "status": "Active",
-        "has_completed_onboarding": True,
-    }})
+def test_me_returns_onboarding_flag_true(db_session, client):
+    user = seed_user(db_session, has_completed_onboarding=True)
     with client.session_transaction() as sess:
-        sess["user_id"] = "u1"
+        sess["user_id"] = str(user.id)
 
     resp = client.get("/api/auth/me")
     assert resp.status_code == 200
     assert resp.get_json()["user"]["has_completed_onboarding"] is True
 
 
-def test_me_derives_onboarding_from_completed_run(fake_firebase, client):
-    # Legacy user: no stored flag, but owns a business with a completed analysis
+def test_me_derives_onboarding_from_completed_run(db_session, fs, client):
+    # Stored flag False, but the user owns a business with a completed analysis
     # run → /me derives has_completed_onboarding True (hybrid evidence path).
-    db, routes_auth, auth_api = fake_firebase
-    seed_users(db, {"u1": {
-        "username": "Alice", "email": "alice@example.com", "role": "user", "status": "Active",
-    }})
-    business_ref = db.collection("businesses").document("b1")
-    business_ref.set({"owner_id": "u1", "name": "Ada's Bakery"})
+    user = seed_user(db_session)
+    uid = str(user.id)
+    business_ref = fs.collection("businesses").document("b1")
+    business_ref.set({"owner_id": uid, "name": "Ada's Bakery"})
     business_ref.collection("agent_runs").document("r1").set({
-        "owner_id": "u1", "analysis_status": "completed",
+        "owner_id": uid, "analysis_status": "completed",
     })
     with client.session_transaction() as sess:
-        sess["user_id"] = "u1"
+        sess["user_id"] = uid
 
     resp = client.get("/api/auth/me")
     assert resp.status_code == 200
     assert resp.get_json()["user"]["has_completed_onboarding"] is True
 
 
-def test_me_onboarding_false_without_completed_run(fake_firebase, client):
-    # A business exists but its run has not completed → no evidence, flag stays False.
-    db, routes_auth, auth_api = fake_firebase
-    seed_users(db, {"u1": {
-        "username": "Alice", "email": "alice@example.com", "role": "user", "status": "Active",
-    }})
-    business_ref = db.collection("businesses").document("b1")
-    business_ref.set({"owner_id": "u1", "name": "Ada's Bakery"})
+def test_me_onboarding_false_without_completed_run(db_session, fs, client):
+    user = seed_user(db_session)
+    uid = str(user.id)
+    business_ref = fs.collection("businesses").document("b1")
+    business_ref.set({"owner_id": uid, "name": "Ada's Bakery"})
     business_ref.collection("agent_runs").document("r1").set({
-        "owner_id": "u1", "analysis_status": "running",
+        "owner_id": uid, "analysis_status": "running",
     })
     with client.session_transaction() as sess:
-        sess["user_id"] = "u1"
+        sess["user_id"] = uid
 
     resp = client.get("/api/auth/me")
     assert resp.status_code == 200
     assert resp.get_json()["user"]["has_completed_onboarding"] is False
-
-
-def test_onboarding_complete_sets_flag(fake_firebase, client):
-    db, routes_auth, auth_api = fake_firebase
-    seed_users(db, {"u1": {
-        "username": "Alice", "email": "alice@example.com", "role": "user", "status": "Active",
-    }})
-    with client.session_transaction() as sess:
-        sess["user_id"] = "u1"
-
-    resp = client.post("/api/auth/onboarding/complete")
-    assert resp.status_code == 200
-    assert resp.get_json() == {"success": True}
-    assert db.collection("users").document("u1").data["has_completed_onboarding"] is True
-
-
-def test_onboarding_complete_is_idempotent(fake_firebase, client):
-    db, routes_auth, auth_api = fake_firebase
-    seed_users(db, {"u1": {
-        "username": "Alice", "email": "alice@example.com", "role": "user", "status": "Active",
-        "has_completed_onboarding": True,
-    }})
-    with client.session_transaction() as sess:
-        sess["user_id"] = "u1"
-
-    resp = client.post("/api/auth/onboarding/complete")
-    assert resp.status_code == 200
-    assert resp.get_json() == {"success": True}
-    assert db.collection("users").document("u1").data["has_completed_onboarding"] is True
-
-
-def test_onboarding_complete_requires_auth(client):
-    resp = client.post("/api/auth/onboarding/complete")
-    assert resp.status_code == 401
-    assert resp.get_json() == {"success": False, "error": "Authentication required"}
-
-
-def test_onboarding_complete_unknown_user_clears_session(fake_firebase, client):
-    db, routes_auth, auth_api = fake_firebase
-    with client.session_transaction() as sess:
-        sess["user_id"] = "ghost"
-
-    resp = client.post("/api/auth/onboarding/complete")
-    assert resp.status_code == 401
-    assert resp.get_json() == {"success": False, "error": "Authentication required"}
-    with client.session_transaction() as sess:
-        assert "user_id" not in sess
 
 
 def test_me_requires_auth(client):
@@ -653,10 +494,9 @@ def test_me_requires_auth(client):
     assert resp.get_json() == {"success": False, "error": "Authentication required"}
 
 
-def test_me_unknown_user_clears_session(fake_firebase, client):
-    db, routes_auth, auth_api = fake_firebase
+def test_me_unknown_user_clears_session(db_session, client):
     with client.session_transaction() as sess:
-        sess["user_id"] = "ghost"
+        sess["user_id"] = ABSENT_UUID
 
     resp = client.get("/api/auth/me")
     assert resp.status_code == 401
@@ -665,8 +505,53 @@ def test_me_unknown_user_clears_session(fake_firebase, client):
         assert "user_id" not in sess
 
 
+# ══════════════════════════════════════════════
+# Onboarding
+# ══════════════════════════════════════════════
+
+def test_onboarding_complete_sets_flag(db_session, client):
+    user = seed_user(db_session)
+    uid = str(user.id)
+    with client.session_transaction() as sess:
+        sess["user_id"] = uid
+
+    resp = client.post("/api/auth/onboarding/complete")
+    assert resp.status_code == 200
+    assert resp.get_json() == {"success": True}
+    assert db_session.query(User).filter_by(id=uid).one().has_completed_onboarding is True
+
+
+def test_onboarding_complete_is_idempotent(db_session, client):
+    user = seed_user(db_session, has_completed_onboarding=True)
+    uid = str(user.id)
+    with client.session_transaction() as sess:
+        sess["user_id"] = uid
+
+    resp = client.post("/api/auth/onboarding/complete")
+    assert resp.status_code == 200
+    assert resp.get_json() == {"success": True}
+    assert db_session.query(User).filter_by(id=uid).one().has_completed_onboarding is True
+
+
+def test_onboarding_complete_requires_auth(client):
+    resp = client.post("/api/auth/onboarding/complete")
+    assert resp.status_code == 401
+    assert resp.get_json() == {"success": False, "error": "Authentication required"}
+
+
+def test_onboarding_complete_unknown_user_clears_session(db_session, client):
+    with client.session_transaction() as sess:
+        sess["user_id"] = ABSENT_UUID
+
+    resp = client.post("/api/auth/onboarding/complete")
+    assert resp.status_code == 401
+    assert resp.get_json() == {"success": False, "error": "Authentication required"}
+    with client.session_transaction() as sess:
+        assert "user_id" not in sess
+
+
 # ──────────────────────────────────────────────
-# login_required decorator — multi-device session set
+# login_required decorator — validates against user_sessions (EXISTS)
 # ──────────────────────────────────────────────
 
 def _run_guarded(flask_app, user_id, session_token):
@@ -688,62 +573,50 @@ def _run_guarded(flask_app, user_id, session_token):
         return view()
 
 
-def test_login_required_passes_for_token_in_set(fake_firebase, flask_app):
-    db, routes_auth, auth_api = fake_firebase
-    seed_users(db, {"u1": {
-        "email": "alice@example.com", "status": "Active",
-        "active_session_tokens": ["tok-A", "tok-B"],
-    }})
+def test_login_required_passes_for_known_token(db_session, flask_app):
+    user = seed_user(db_session)
+    uid = str(user.id)
+    seed_session(db_session, uid, "tok-A")
+    seed_session(db_session, uid, "tok-B")
 
-    # Both members of the set validate (two concurrent devices).
-    assert _run_guarded(flask_app, "u1", "tok-A") == "ok"
-    assert _run_guarded(flask_app, "u1", "tok-B") == "ok"
+    # Both concurrent devices validate.
+    assert _run_guarded(flask_app, uid, "tok-A") == "ok"
+    assert _run_guarded(flask_app, uid, "tok-B") == "ok"
 
 
-def test_login_required_rejects_token_not_in_set(fake_firebase, flask_app):
-    db, routes_auth, auth_api = fake_firebase
-    seed_users(db, {"u1": {
-        "email": "alice@example.com", "status": "Active",
-        "active_session_tokens": ["tok-A"],
-    }})
+def test_login_required_rejects_unknown_token(db_session, flask_app):
+    user = seed_user(db_session)
+    uid = str(user.id)
+    seed_session(db_session, uid, "tok-A")
 
-    resp = _run_guarded(flask_app, "u1", "tok-UNKNOWN")
-    # Unauthorized stays unauthorized → redirect to login.
+    resp = _run_guarded(flask_app, uid, "tok-UNKNOWN")
     assert getattr(resp, "status_code", None) == 302
 
 
-def test_login_required_backward_compat_legacy_token(fake_firebase, flask_app):
-    # Legacy doc: single `active_session_token`, no set → still authenticates.
-    db, routes_auth, auth_api = fake_firebase
-    seed_users(db, {"u1": {
-        "email": "alice@example.com", "status": "Active",
-        "active_session_token": "legacy-token",
-    }})
+def test_login_required_rejects_when_no_sessions(db_session, flask_app):
+    user = seed_user(db_session)
+    uid = str(user.id)
 
-    assert _run_guarded(flask_app, "u1", "legacy-token") == "ok"
-    assert getattr(_run_guarded(flask_app, "u1", "nope"), "status_code", None) == 302
+    resp = _run_guarded(flask_app, uid, "anything")
+    assert getattr(resp, "status_code", None) == 302
 
 
-def test_login_required_rejects_empty_set(fake_firebase, flask_app):
-    db, routes_auth, auth_api = fake_firebase
-    seed_users(db, {"u1": {
-        "email": "alice@example.com", "status": "Active",
-        "active_session_tokens": [],
-    }})
+def test_login_required_rejects_absent_token(db_session, flask_app):
+    user = seed_user(db_session)
+    uid = str(user.id)
+    seed_session(db_session, uid, "tok-A")
 
-    resp = _run_guarded(flask_app, "u1", "anything")
+    # No session_token in the cookie at all → rejected.
+    resp = _run_guarded(flask_app, uid, None)
     assert getattr(resp, "status_code", None) == 302
 
 
 # ──────────────────────────────────────────────
-# DELETE /api/auth/account — hard account deletion
+# DELETE /api/auth/account — split-store hard deletion
 #
-# These need a richer fake Firestore than AuthDb above: nested subcollections,
-# db.recursive_delete(ref), and .document(id).delete(). Modeled on the CrudDb
-# fake in test_user_routes.py.
+# The user row (+ cascade of user_sessions / security_logs) is in Postgres; the
+# businesses cascade and student_profiles stay on Firestore (the DelDb fake).
 # ──────────────────────────────────────────────
-
-import itertools as _itertools
 
 
 class DelSnapshot:
@@ -843,33 +716,31 @@ def account_db(monkeypatch):
 
     db = DelDb()
     monkeypatch.setattr(auth_api, "db", db)
-    # Defaults: no provider connections, revocation/tile cleanup are no-ops.
     monkeypatch.setattr(auth_api.connection_service, "get_connection", lambda *a, **k: None)
     monkeypatch.setattr(auth_api.connection_service, "revoke_github_token", lambda *a, **k: True)
     monkeypatch.setattr(auth_api.connection_service, "revoke_google_token", lambda *a, **k: True)
     monkeypatch.setattr(auth_api.tile_storage_service, "delete_tiles_for_business", lambda *a, **k: None)
-    # Never hit real Firebase Auth; tests that care override this.
-    monkeypatch.setattr(auth_api.auth.admin_auth, "delete_user", lambda uid: None)
     return db, auth_api
 
 
-def _seed_account(db, user_id="u1", email="alice@example.com"):
-    """Seed a user with a business (several subcollections), a student_profile,
-    and a security_logs entry — the full footprint account deletion must clear."""
-    db._store[("users", user_id)] = {
-        "username": "Alice", "email": email, "role": "user", "status": "Active",
-    }
-    biz = ("businesses", f"{user_id}-b1")
-    db._store[biz] = {"owner_id": user_id, "name": "Ada's Bakery"}
-    db._store[biz + ("opportunities", "opp1")] = {"owner_id": user_id}
-    db._store[biz + ("opportunities", "opp2")] = {"owner_id": user_id}
-    db._store[biz + ("actions", "act1")] = {"owner_id": user_id}
-    db._store[biz + ("connections", "con1")] = {"owner_id": user_id, "provider": "github"}
-    db._store[biz + ("gtm_runs", "gtm1")] = {"owner_id": user_id}
-    db._store[("student_profiles", user_id)] = {"bio": "hi"}
-    db._store[("security_logs", f"{user_id}-log1")] = {
-        "user_id": user_id, "type": "device_mismatch",
-    }
+def _seed_account(db_session, fs_db, email="alice@example.com"):
+    """Seed the full footprint of one account: the Postgres user plus a
+    security_logs row (cascade targets), and the Firestore business (with
+    subcollections) + student_profile that stay on Firestore this slice."""
+    user = seed_user(db_session, email=email)
+    uid = str(user.id)
+    db_session.add(SecurityLog(type="device_mismatch", user_id=uid))
+    db_session.commit()
+
+    biz = ("businesses", f"{uid}-b1")
+    fs_db._store[biz] = {"owner_id": uid, "name": "Ada's Bakery"}
+    fs_db._store[biz + ("opportunities", "opp1")] = {"owner_id": uid}
+    fs_db._store[biz + ("opportunities", "opp2")] = {"owner_id": uid}
+    fs_db._store[biz + ("actions", "act1")] = {"owner_id": uid}
+    fs_db._store[biz + ("connections", "con1")] = {"owner_id": uid, "provider": "github"}
+    fs_db._store[biz + ("gtm_runs", "gtm1")] = {"owner_id": uid}
+    fs_db._store[("student_profiles", uid)] = {"bio": "hi"}
+    return uid
 
 
 def _login(client, user_id):
@@ -877,50 +748,57 @@ def _login(client, user_id):
         sess["user_id"] = user_id
 
 
-def test_delete_account_hard_deletes_everything(account_db, client):
-    db, auth_api = account_db
-    _seed_account(db, "u1", "alice@example.com")
-    _login(client, "u1")
+def _user_rows(db_session, uid):
+    return db_session.query(User).filter_by(id=uid).count()
+
+
+def _security_log_rows(db_session, uid):
+    return db_session.query(SecurityLog).filter_by(user_id=uid).count()
+
+
+def test_delete_account_hard_deletes_everything(account_db, db_session, client):
+    # Required case: deletion removes the Postgres user + its cascade AND still
+    # triggers the Firestore recursive_delete business cascade.
+    fs_db, auth_api = account_db
+    uid = _seed_account(db_session, fs_db, "alice@example.com")
+    _login(client, uid)
 
     # Confirmation is re-verified case-insensitively (stored email is lowercased).
     resp = client.delete("/api/auth/account", json={"confirm_email": "Alice@Example.com"})
     assert resp.status_code == 200
     assert resp.get_json() == {"success": True, "message": "Account deleted"}
 
-    # User doc, every business doc + subcollection doc, student_profile, and the
-    # user's security_logs are all gone.
-    assert ("users", "u1") not in db._store
-    assert [p for p in db._store if p[:2] == ("businesses", "u1-b1")] == []
-    assert ("student_profiles", "u1") not in db._store
-    assert ("security_logs", "u1-log1") not in db._store
-    # Session dropped.
+    # Firestore: business + every subcollection doc + student_profile gone.
+    assert [p for p in fs_db._store if p[:2] == ("businesses", f"{uid}-b1")] == []
+    assert ("student_profiles", uid) not in fs_db._store
+    # Postgres: user + its security_logs (and any sessions) gone via FK cascade.
+    assert _user_rows(db_session, uid) == 0
+    assert _security_log_rows(db_session, uid) == 0
     with client.session_transaction() as sess:
         assert "user_id" not in sess
 
 
-def test_delete_account_isolates_other_users(account_db, client):
-    db, auth_api = account_db
-    _seed_account(db, "u1", "alice@example.com")
-    _seed_account(db, "u2", "bob@example.com")
-    _login(client, "u1")
+def test_delete_account_isolates_other_users(account_db, db_session, client):
+    fs_db, auth_api = account_db
+    uid1 = _seed_account(db_session, fs_db, "alice@example.com")
+    uid2 = _seed_account(db_session, fs_db, "bob@example.com")
+    _login(client, uid1)
 
     resp = client.delete("/api/auth/account", json={"confirm_email": "alice@example.com"})
     assert resp.status_code == 200
 
-    # Everything belonging to u2 is untouched.
-    assert ("users", "u2") in db._store
-    assert ("businesses", "u2-b1") in db._store
-    assert ("businesses", "u2-b1", "opportunities", "opp1") in db._store
-    assert ("student_profiles", "u2") in db._store
-    assert ("security_logs", "u2-log1") in db._store
+    # Everything belonging to u2 is untouched (both stores).
+    assert ("businesses", f"{uid2}-b1") in fs_db._store
+    assert ("businesses", f"{uid2}-b1", "opportunities", "opp1") in fs_db._store
+    assert ("student_profiles", uid2) in fs_db._store
+    assert _user_rows(db_session, uid2) == 1
+    assert _security_log_rows(db_session, uid2) == 1
 
 
-def test_delete_account_revokes_and_cleans_tiles_when_connected(account_db, client):
-    # When a business has connected providers, the revoke helpers and tile
-    # cleanup are invoked (best-effort) before the Firestore cascade.
-    db, auth_api = account_db
-    _seed_account(db, "u1", "alice@example.com")
-    _login(client, "u1")
+def test_delete_account_revokes_and_cleans_tiles_when_connected(account_db, db_session, client):
+    fs_db, auth_api = account_db
+    uid = _seed_account(db_session, fs_db, "alice@example.com")
+    _login(client, uid)
 
     gh_calls, goog_calls, tile_calls = [], [], []
     conn = {"access_token": "gh-access", "refresh_token": "goog-refresh"}
@@ -933,16 +811,16 @@ def test_delete_account_revokes_and_cleans_tiles_when_connected(account_db, clie
     assert resp.status_code == 200
     assert gh_calls == ["gh-access"]
     assert goog_calls == ["goog-refresh"]  # refresh token preferred
-    assert tile_calls == ["u1-b1"]
-    assert ("users", "u1") not in db._store
+    assert tile_calls == [f"{uid}-b1"]
+    assert _user_rows(db_session, uid) == 0
 
 
-def test_delete_account_best_effort_failures_still_delete(account_db, client):
+def test_delete_account_best_effort_failures_still_delete(account_db, db_session, client):
     # Even if the revoke helpers AND the tile helper RAISE, the hard delete must
     # still complete and return 200.
-    db, auth_api = account_db
-    _seed_account(db, "u1", "alice@example.com")
-    _login(client, "u1")
+    fs_db, auth_api = account_db
+    uid = _seed_account(db_session, fs_db, "alice@example.com")
+    _login(client, uid)
 
     def boom(*a, **k):
         raise RuntimeError("provider down")
@@ -957,51 +835,51 @@ def test_delete_account_best_effort_failures_still_delete(account_db, client):
     resp = client.delete("/api/auth/account", json={"confirm_email": "alice@example.com"})
     assert resp.status_code == 200
     assert resp.get_json()["success"] is True
-    assert ("users", "u1") not in db._store
-    assert [p for p in db._store if p[:2] == ("businesses", "u1-b1")] == []
-    assert ("security_logs", "u1-log1") not in db._store
+    assert _user_rows(db_session, uid) == 0
+    assert [p for p in fs_db._store if p[:2] == ("businesses", f"{uid}-b1")] == []
+    assert _security_log_rows(db_session, uid) == 0
 
 
-def test_delete_account_wrong_email_400_nothing_deleted(account_db, client):
-    db, auth_api = account_db
-    _seed_account(db, "u1", "alice@example.com")
-    before = dict(db._store)
-    _login(client, "u1")
+def test_delete_account_wrong_email_400_nothing_deleted(account_db, db_session, client):
+    fs_db, auth_api = account_db
+    uid = _seed_account(db_session, fs_db, "alice@example.com")
+    fs_before = dict(fs_db._store)
+    _login(client, uid)
 
     resp = client.delete("/api/auth/account", json={"confirm_email": "wrong@example.com"})
     assert resp.status_code == 400
     assert resp.get_json() == {"success": False, "error": "Email confirmation does not match"}
-    assert db._store == before
+    assert fs_db._store == fs_before
+    assert _user_rows(db_session, uid) == 1
+    assert _security_log_rows(db_session, uid) == 1
 
 
-def test_delete_account_missing_email_400_nothing_deleted(account_db, client):
-    db, auth_api = account_db
-    _seed_account(db, "u1", "alice@example.com")
-    before = dict(db._store)
-    _login(client, "u1")
+def test_delete_account_missing_email_400_nothing_deleted(account_db, db_session, client):
+    fs_db, auth_api = account_db
+    uid = _seed_account(db_session, fs_db, "alice@example.com")
+    fs_before = dict(fs_db._store)
+    _login(client, uid)
 
     resp = client.delete("/api/auth/account", json={})
     assert resp.status_code == 400
     assert resp.get_json() == {"success": False, "error": "Email confirmation does not match"}
-    assert db._store == before
+    assert fs_db._store == fs_before
+    assert _user_rows(db_session, uid) == 1
 
 
 def test_delete_account_unauthenticated_401(account_db, client):
-    db, auth_api = account_db
-    _seed_account(db, "u1", "alice@example.com")
-    before = dict(db._store)
+    fs_db, auth_api = account_db
     with client.session_transaction() as sess:
         sess.clear()
 
     resp = client.delete("/api/auth/account", json={"confirm_email": "alice@example.com"})
     assert resp.status_code == 401
     assert resp.get_json() == {"success": False, "error": "Authentication required"}
-    assert db._store == before
 
 
-def test_delete_account_missing_user_doc_404(account_db, client):
-    db, auth_api = account_db
-    _login(client, "ghost")
+def test_delete_account_missing_user_404(account_db, db_session, client):
+    fs_db, auth_api = account_db
+    _login(client, ABSENT_UUID)
 
     resp = client.delete("/api/auth/account", json={"confirm_email": "alice@example.com"})
     assert resp.status_code == 404
@@ -1017,45 +895,3 @@ def test_delete_account_route_registered(flask_app):
     )
     assert rule is not None
     assert "DELETE" in rule.methods
-
-
-def test_delete_account_also_deletes_firebase_auth_user(account_db, client, monkeypatch):
-    db, auth_api = account_db
-    _seed_account(db, "u1", "alice@example.com")
-    _login(client, "u1")
-    deleted = []
-    monkeypatch.setattr(auth_api.auth.admin_auth, "delete_user", deleted.append)
-
-    resp = client.delete("/api/auth/account", json={"confirm_email": "alice@example.com"})
-    assert resp.status_code == 200
-    assert deleted == ["u1"]
-    assert ("users", "u1") not in db._store
-
-
-def test_delete_account_firebase_auth_failure_still_200(account_db, client, monkeypatch):
-    db, auth_api = account_db
-    _seed_account(db, "u1", "alice@example.com")
-    _login(client, "u1")
-
-    def boom(uid):
-        raise RuntimeError("firebase down")
-
-    monkeypatch.setattr(auth_api.auth.admin_auth, "delete_user", boom)
-
-    resp = client.delete("/api/auth/account", json={"confirm_email": "alice@example.com"})
-    assert resp.status_code == 200
-    assert resp.get_json() == {"success": True, "message": "Account deleted"}
-    assert ("users", "u1") not in db._store
-    assert [p for p in db._store if p[:2] == ("businesses", "u1-b1")] == []
-
-
-def test_delete_account_wrong_email_does_not_delete_firebase_user(account_db, client, monkeypatch):
-    db, auth_api = account_db
-    _seed_account(db, "u1", "alice@example.com")
-    _login(client, "u1")
-    deleted = []
-    monkeypatch.setattr(auth_api.auth.admin_auth, "delete_user", deleted.append)
-
-    resp = client.delete("/api/auth/account", json={"confirm_email": "wrong@example.com"})
-    assert resp.status_code == 400
-    assert deleted == []
