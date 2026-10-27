@@ -518,7 +518,9 @@ def test_onboarding_complete_sets_flag(db_session, client):
     resp = client.post("/api/auth/onboarding/complete")
     assert resp.status_code == 200
     assert resp.get_json() == {"success": True}
-    assert db_session.query(User).filter_by(id=uid).one().has_completed_onboarding is True
+    # Column-scalar read (not the entity) so the route's commit in its own
+    # request-scoped session is seen, not a stale identity-map value.
+    assert db_session.query(User.has_completed_onboarding).filter_by(id=uid).scalar() is True
 
 
 def test_onboarding_complete_is_idempotent(db_session, client):
@@ -530,7 +532,7 @@ def test_onboarding_complete_is_idempotent(db_session, client):
     resp = client.post("/api/auth/onboarding/complete")
     assert resp.status_code == 200
     assert resp.get_json() == {"success": True}
-    assert db_session.query(User).filter_by(id=uid).one().has_completed_onboarding is True
+    assert db_session.query(User.has_completed_onboarding).filter_by(id=uid).scalar() is True
 
 
 def test_onboarding_complete_requires_auth(client):

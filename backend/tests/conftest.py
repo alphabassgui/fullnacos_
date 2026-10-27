@@ -76,32 +76,34 @@ def db_conn(engine):
 
 @pytest.fixture()
 def db_session(flask_app):
-    """Bind Flask-SQLAlchemy's ``db.session`` to a single connection wrapped in
-    an outer transaction, rolled back after the test so nothing persists.
+    """Flask-SQLAlchemy's ``db.session`` against the disposable test database,
+    with the three auth tables wiped after each test so nothing leaks between
+    tests.
 
-    The ORM auth routes call ``db.session.commit()``; ``join_transaction_mode=
-    "create_savepoint"`` turns each such commit into a SAVEPOINT release inside
-    the outer transaction, so the final ``rollback()`` still undoes everything.
+    A connection/SAVEPOINT rollback would be cleaner, but Flask-SQLAlchemy's
+    ``Session.get_bind()`` routes mapped-class queries straight to the engine
+    (ignoring a session bound to an external connection), and the auth routes
+    run in their own request-scoped sessions that commit to the real database.
+    So isolation is enforced by truncating the tables in teardown instead.
     Skips when TEST_DATABASE_URL is unset, leaving the DB-independent tests to
     run locally.
     """
     if not os.getenv("TEST_DATABASE_URL"):
         pytest.skip("TEST_DATABASE_URL not set; skipping Postgres-backed tests")
 
+    import sqlalchemy as sa
+
     from extensions import db
 
     with flask_app.app_context():
-        connection = db.engine.connect()
-        outer = connection.begin()
-        original_session = db.session
-        db.session = db._make_scoped_session(
-            {"bind": connection, "join_transaction_mode": "create_savepoint"}
-        )
         try:
             yield db.session
         finally:
+            db.session.rollback()
+            db.session.execute(
+                sa.text(
+                    "TRUNCATE users, user_sessions, security_logs CASCADE"
+                )
+            )
+            db.session.commit()
             db.session.remove()
-            db.session = original_session
-            if outer.is_active:
-                outer.rollback()
-            connection.close()
