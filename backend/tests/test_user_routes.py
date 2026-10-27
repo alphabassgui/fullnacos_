@@ -1,10 +1,11 @@
 import itertools
-from types import SimpleNamespace
+import uuid
+from datetime import datetime
 
 import pytest
 from werkzeug.security import generate_password_hash
 
-from models import Business, User
+from models import Action, AgentRun, Business, Execution, Opportunity, User
 
 # A syntactically valid UUID that is never seeded — the "unknown business" path
 # (a non-UUID id also resolves to None, but a real UUID proves the Postgres miss).
@@ -24,9 +25,9 @@ def client(flask_app):
 
 
 # ──────────────────────────────────────────────
-# Postgres seed helpers. The parent business lives in Postgres now (slice c);
-# its children (agent_runs, opportunities, actions, ...) stay on Firestore,
-# keyed by the business UUID string.
+# Postgres seed helpers. The parent business (slice c) and now its coupled
+# pipeline children (agent_runs, opportunities, actions, ...) all live in
+# Postgres (PR d-core), keyed by the business UUID.
 # ──────────────────────────────────────────────
 
 
@@ -52,6 +53,53 @@ def seed_business(db_session, owner_id, name="A", **overrides):
     return business
 
 
+def seed_agent_run(db_session, business_id, owner_id, **overrides):
+    fields = dict(
+        business_id=business_id,
+        owner_id=owner_id,
+        type="website_analysis",
+        status="queued",
+    )
+    fields.update(overrides)
+    run = AgentRun(**fields)
+    db_session.add(run)
+    db_session.commit()
+    return run
+
+
+def seed_opportunity(db_session, business_id, owner_id, **overrides):
+    fields = dict(
+        business_id=business_id,
+        owner_id=owner_id,
+        title="Add SEO",
+        description="d",
+        problem="p",
+        evidence=["e"],
+        potential_impact="high",
+        confidence=0.9,
+        type="seo",
+    )
+    fields.update(overrides)
+    opp = Opportunity(**fields)
+    db_session.add(opp)
+    db_session.commit()
+    return opp
+
+
+def seed_action(db_session, business_id, owner_id, **overrides):
+    fields = dict(
+        business_id=business_id,
+        owner_id=owner_id,
+        action_type="social",
+        status="approved",
+    )
+    fields.update(overrides)
+    act = Action(**fields)
+    db_session.add(act)
+    db_session.commit()
+    return act
+
+
 def _count_pg_businesses(db_session, owner_id):
     return db_session.query(Business).filter_by(owner_id=owner_id).count()
 
@@ -72,70 +120,9 @@ def test_app_boots_and_blueprints_register(flask_app):
 
 
 # ─────────────────────────────────────────────────────────────
-# Firestore fake for the agent_runs child write in analyze (set + update).
-# The parent ownership guard reads Postgres; this fake only backs the child.
+# analyze: the run record is a Postgres agent_runs row now. When the broker is
+# down the route stamps that row failed (not a Firestore doc) and returns 503.
 # ─────────────────────────────────────────────────────────────
-
-
-class FakeRef:
-    def __init__(self, db, path):
-        self._db = db
-        self.path = list(path)
-        self.id = self.path[-1]
-        self.updates = []
-        self.collections = {}
-        self._set = None
-
-    def get(self):
-        return FakeQuery(self.path in self._db._existing)
-
-    def collection(self, sub):
-        if sub not in self.collections:
-            self.collections[sub] = FakeCollection(self._db, self.path + [sub])
-        return self.collections[sub]
-
-    def set(self, data):
-        self._set = data
-
-    def update(self, data):
-        self.updates.append(data)
-
-
-class FakeQuery:
-    def __init__(self, exists, data=None):
-        self._exists = exists
-        self._data = data or {}
-
-    @property
-    def exists(self):
-        return self._exists
-
-    def to_dict(self):
-        return dict(self._data)
-
-
-class FakeCollection:
-    def __init__(self, db, path):
-        self._db = db
-        self.path = list(path)
-        self.docs = {}
-
-    def document(self, doc_id=None):
-        key = doc_id or "auto_run_id"
-        if key not in self.docs:
-            self.docs[key] = FakeRef(self._db, self.path + [key])
-        return self.docs[key]
-
-
-class FakeDb:
-    def __init__(self):
-        self.collections = {}
-        self._existing = []
-
-    def collection(self, name):
-        if name not in self.collections:
-            self.collections[name] = FakeCollection(self, [name])
-        return self.collections[name]
 
 
 def test_analyze_returns_503_and_fails_run_when_broker_down(db_session, monkeypatch, client):
@@ -150,7 +137,6 @@ def test_analyze_returns_503_and_fails_run_when_broker_down(db_session, monkeypa
         raise RuntimeError("broker unreachable")
 
     monkeypatch.setattr(routes_user.analyze_business_website, "delay", raise_broker)
-    monkeypatch.setattr(routes_user, "db", FakeDb())
 
     _login(client, uid)
 
@@ -158,130 +144,75 @@ def test_analyze_returns_503_and_fails_run_when_broker_down(db_session, monkeypa
     assert resp.status_code == 503
     assert resp.get_json()["success"] is False
 
-    biz_ref = routes_user.db.collection("businesses").document(bid)
-    run_ref = biz_ref.collection("agent_runs").document("auto_run_id")
-    assert run_ref.updates, "run doc should have been updated"
-    assert run_ref.updates[-1]["status"] == "failed"
+    # The Postgres agent_runs row for this business is marked failed.
+    run = (
+        db_session.query(AgentRun)
+        .filter_by(business_id=bid)
+        .order_by(AgentRun.created_at.desc())
+        .first()
+    )
+    assert run is not None
+    assert run.status == "failed"
+    assert run.error == "broker unreachable"
+    assert run.failed_at is not None
 
 
 # ─────────────────────────────────────────────────────────────
-# Read-only child routes (get_opportunity, get_latest_run). Parent in Postgres,
-# children in a read-only Firestore fake keyed by the business UUID string.
-# NB: none of these seed a ("businesses", <uuid>) Firestore parent doc — the
-# parent lives in Postgres only, so every one is a Category-B scenario.
+# Read-only child routes (get_opportunity, get_latest_run) now read Postgres.
 # ─────────────────────────────────────────────────────────────
-
-
-class SeedSnapshot:
-    def __init__(self, data, doc_id):
-        self.exists = data is not None
-        self._data = dict(data) if data else {}
-        self.id = doc_id
-
-    def to_dict(self):
-        return dict(self._data)
-
-
-class SeedCollection:
-    def __init__(self, db, path):
-        self._db = db
-        self.path = path
-
-    def document(self, doc_id):
-        return SeedRef(self._db, self.path + [doc_id])
-
-    def stream(self):
-        prefix = tuple(self.path)
-        return [
-            SeedSnapshot(data, path[-1])
-            for path, data in self._db._seed.items()
-            if len(path) == len(prefix) + 1 and path[: len(prefix)] == prefix
-        ]
-
-
-class SeedRef:
-    def __init__(self, db, path):
-        self._db = db
-        self.path = path
-
-    @property
-    def id(self):
-        return self.path[-1]
-
-    def get(self):
-        return SeedSnapshot(self._db._seed.get(tuple(self.path)), self.id)
-
-    def collection(self, name):
-        return SeedCollection(self._db, self.path + [name])
-
-
-class SeedFakeDb:
-    def __init__(self, seed):
-        self._seed = {tuple(k): v for k, v in seed.items()}
-
-    def collection(self, name):
-        return SeedCollection(self, [name])
 
 
 @pytest.fixture
-def seeded(db_session, client, monkeypatch):
-    """Owner u1 with one business (Postgres) + an opportunity and two agent_runs
-    (Firestore, keyed by the business UUID). Returns the uid/bid and the module."""
-    import routes.user as routes_user
-
+def seeded(db_session, client):
+    """Owner u1 with one business + an opportunity and two agent_runs, all in
+    Postgres. Returns the uid/bid and the seeded opportunity/run rows."""
     user = seed_user(db_session, email="u1@example.com")
     uid = str(user.id)
-    business = seed_business(db_session, owner_id=uid, name="A", website_url="https://a.example")
+    business = seed_business(
+        db_session, owner_id=uid, name="A", website_url="https://a.example"
+    )
     bid = str(business.id)
-    seed = {
-        (("businesses", bid, "opportunities", "opp1")): {
-            "owner_id": uid, "title": "Add SEO", "description": "d", "problem": "p",
-            "evidence": ["e"], "potential_impact": "high", "confidence": 0.9,
-            "type": "seo", "position": 0,
-        },
-        (("businesses", bid, "agent_runs", "r1")): {
-            "business_id": bid, "owner_id": uid, "type": "website_analysis",
-            "status": "completed", "observation_id": "obs1",
-            "opportunity_ids": ["opp1"],
-            "created_at": "2026-09-16T00:00:00",
-            "completed_at": "2026-09-16T00:00:01",
-        },
-        (("businesses", bid, "agent_runs", "r2")): {
-            "business_id": bid, "owner_id": uid, "type": "website_analysis",
-            "status": "running",
-            "created_at": "2026-09-16T01:00:00",
-        },
-    }
-    monkeypatch.setattr(routes_user, "db", SeedFakeDb(seed))
+    opp = seed_opportunity(
+        db_session, bid, uid, title="Add SEO", description="d", problem="p",
+        evidence=["e"], potential_impact="high", confidence=0.9, type="seo",
+    )
+    r1 = seed_agent_run(
+        db_session, bid, uid, status="completed",
+        observation_id=uuid.uuid4(), opportunity_ids=[str(opp.id)],
+        created_at=datetime(2026, 9, 16, 0, 0, 0),
+        completed_at=datetime(2026, 9, 16, 0, 0, 1),
+    )
+    r2 = seed_agent_run(
+        db_session, bid, uid, status="running",
+        created_at=datetime(2026, 9, 16, 1, 0, 0),
+    )
     _login(client, uid)
-    return SimpleNamespace(routes_user=routes_user, uid=uid, bid=bid)
+    return type("S", (), {"uid": uid, "bid": bid, "opp": opp, "r1": r1, "r2": r2})()
 
 
 def test_get_opportunity_returns_200_for_owner(client, seeded):
-    resp = client.get(f"/api/business/{seeded.bid}/opportunities/opp1")
+    resp = client.get(f"/api/business/{seeded.bid}/opportunities/{seeded.opp.id}")
     assert resp.status_code == 200
     body = resp.get_json()
     assert body["success"] is True
-    assert body["opportunity"]["id"] == "opp1"
+    assert body["opportunity"]["id"] == str(seeded.opp.id)
     assert body["opportunity"]["title"] == "Add SEO"
 
 
-def test_get_opportunity_403_for_non_owner(db_session, client, monkeypatch):
-    import routes.user as routes_user
+def test_get_opportunity_404_unknown_id(client, seeded):
+    resp = client.get(f"/api/business/{seeded.bid}/opportunities/{ABSENT_UUID}")
+    assert resp.status_code == 404
 
+
+def test_get_opportunity_403_for_non_owner(db_session, client):
     owner = seed_user(db_session, email="u2@example.com")
     caller = seed_user(db_session, email="u1@example.com")
     business = seed_business(db_session, owner_id=str(owner.id), name="B")
     bid = str(business.id)
-    seed = {
-        (("businesses", bid, "opportunities", "opp1")): {
-            "owner_id": str(owner.id), "title": "T",
-        },
-    }
-    monkeypatch.setattr(routes_user, "db", SeedFakeDb(seed))
+    opp = seed_opportunity(db_session, bid, str(owner.id), title="T")
     _login(client, str(caller.id))
 
-    resp = client.get(f"/api/business/{bid}/opportunities/opp1")
+    resp = client.get(f"/api/business/{bid}/opportunities/{opp.id}")
     assert resp.status_code == 403
 
 
@@ -289,19 +220,16 @@ def test_get_latest_run_returns_most_recent(client, seeded):
     resp = client.get(f"/api/business/{seeded.bid}/runs/latest")
     assert resp.status_code == 200
     run = resp.get_json()["run"]
-    assert run["run_id"] == "r2"
+    assert run["run_id"] == str(seeded.r2.id)
     assert run["status"] == "running"
     assert run["observation_id"] is None
     assert run["opportunity_ids"] is None
 
 
-def test_get_latest_run_none_when_no_runs(db_session, client, monkeypatch):
-    import routes.user as routes_user
-
+def test_get_latest_run_none_when_no_runs(db_session, client):
     user = seed_user(db_session)
     uid = str(user.id)
     business = seed_business(db_session, owner_id=uid, website_url="https://a.example")
-    monkeypatch.setattr(routes_user, "db", SeedFakeDb({}))
     _login(client, uid)
 
     resp = client.get(f"/api/business/{business.id}/runs/latest")
@@ -314,13 +242,10 @@ def test_get_latest_run_404_missing_business(client, seeded):
     assert resp.status_code == 404
 
 
-def test_get_latest_run_403_non_owner(db_session, client, monkeypatch):
-    import routes.user as routes_user
-
+def test_get_latest_run_403_non_owner(db_session, client):
     owner = seed_user(db_session, email="u2@example.com")
     caller = seed_user(db_session, email="u1@example.com")
     business = seed_business(db_session, owner_id=str(owner.id), name="B")
-    monkeypatch.setattr(routes_user, "db", SeedFakeDb({}))
     _login(client, str(caller.id))
 
     resp = client.get(f"/api/business/{business.id}/runs/latest")
@@ -334,69 +259,31 @@ def test_get_latest_run_401_without_session(client, seeded):
     assert resp.status_code == 401
 
 
-def test_get_latest_run_returns_full_run_from_completed(db_session, client, monkeypatch):
-    import routes.user as routes_user
-
+def test_get_latest_run_returns_full_run_from_completed(db_session, client):
     user = seed_user(db_session)
     uid = str(user.id)
     business = seed_business(db_session, owner_id=uid, website_url="https://a.example")
     bid = str(business.id)
-    seed = {
-        (("businesses", bid, "agent_runs", "r1")): {
-            "business_id": bid, "owner_id": uid, "type": "website_analysis",
-            "status": "completed", "observation_id": "obs1", "opportunity_ids": ["opp1"],
-            "created_at": "2026-09-16T00:00:00", "completed_at": "2026-09-16T00:00:01",
-        },
-    }
-    monkeypatch.setattr(routes_user, "db", SeedFakeDb(seed))
+    obs_id = uuid.uuid4()
+    run = seed_agent_run(
+        db_session, bid, uid, status="completed",
+        observation_id=obs_id, opportunity_ids=["opp1"],
+        created_at=datetime(2026, 9, 16, 0, 0, 0),
+        completed_at=datetime(2026, 9, 16, 0, 0, 1),
+    )
     _login(client, uid)
 
     resp = client.get(f"/api/business/{bid}/runs/latest")
-    run = resp.get_json()["run"]
-    assert run == {
-        "run_id": "r1", "status": "completed", "observation_id": "obs1",
+    run_body = resp.get_json()["run"]
+    assert run_body == {
+        "run_id": str(run.id), "status": "completed", "observation_id": str(obs_id),
         "opportunity_ids": ["opp1"], "error": None,
         "created_at": "2026-09-16T00:00:00", "completed_at": "2026-09-16T00:00:01",
     }
 
 
 # ─────────────────────────────────────────────────────────────
-# Category-B regression: a child write survives the parent leaving Firestore.
-# With NO ("businesses", <uuid>) Firestore parent doc present, a child document
-# addressed by the business UUID is still readable through the route. This is
-# the explicit proof that subcollections persist independently of the parent.
-# ─────────────────────────────────────────────────────────────
-
-
-def test_child_survives_without_firestore_parent_doc(db_session, client, monkeypatch):
-    import routes.user as routes_user
-
-    user = seed_user(db_session)
-    uid = str(user.id)
-    business = seed_business(db_session, owner_id=uid, website_url="https://a.example")
-    bid = str(business.id)
-
-    fs = CrudDb()
-    # Deliberately NO ("businesses", bid) parent doc in Firestore — only the child.
-    fs._store[("businesses", bid, "agent_runs", "r1")] = {
-        "business_id": bid, "owner_id": uid, "status": "completed",
-        "observation_id": "obs1", "opportunity_ids": ["opp1"],
-        "created_at": "2026-09-16T00:00:00", "completed_at": "2026-09-16T00:00:01",
-    }
-    monkeypatch.setattr(routes_user, "db", fs)
-    _login(client, uid)
-
-    resp = client.get(f"/api/business/{bid}/runs/latest")
-    assert resp.status_code == 200
-    run = resp.get_json()["run"]
-    assert run["run_id"] == "r1"
-    assert run["status"] == "completed"
-    # The parent business doc never existed in Firestore — it lives in Postgres.
-    assert ("businesses", bid) not in fs._store
-
-
-# ─────────────────────────────────────────────────────────────
-# create_business (POST /api/business): dedupe is a Postgres SELECT now +
+# create_business (POST /api/business): dedupe is a Postgres SELECT +
 # partial-UNIQUE backstop. No Firestore write at all. Counts are Postgres rows.
 # ─────────────────────────────────────────────────────────────
 
@@ -513,46 +400,11 @@ def test_create_missing_name_400(db_session, client):
 
 
 # ─────────────────────────────────────────────────────────────
-# delete_business (DELETE /api/business/<id>): deletes the Postgres row, then
-# recursively deletes the Firestore children addressed by the same UUID string.
+# delete_business (DELETE /api/business/<id>): deletes the Postgres row (its
+# Postgres children cascade via ON DELETE CASCADE), then recursively deletes the
+# remaining Firestore children (connections, gtm_runs) addressed by the same
+# UUID string. The Firestore fake below backs only that recursive_delete.
 # ─────────────────────────────────────────────────────────────
-
-
-class CrudSnapshot:
-    def __init__(self, data, doc_id):
-        self.exists = data is not None
-        self._data = dict(data) if data else {}
-        self.id = doc_id
-
-    def to_dict(self):
-        return dict(self._data)
-
-
-class CrudQuery:
-    def __init__(self, db, parent_path, filters):
-        self._db = db
-        self._parent_path = tuple(parent_path)
-        self._filters = list(filters)
-
-    def where(self, *args, **kwargs):
-        if kwargs.get("filter") is not None:
-            f = kwargs["filter"]
-            field, op, value = f.field_path, f.op_string, f.value
-        else:
-            field, op, value = args[:3]
-        return CrudQuery(self._db, self._parent_path, self._filters + [(field, op, value)])
-
-    def stream(self):
-        out = []
-        for path, data in self._db._store.items():
-            if len(path) != len(self._parent_path) + 1:
-                continue
-            if path[: len(self._parent_path)] != self._parent_path:
-                continue
-            if all(op == "==" and data.get(field) == value
-                   for field, op, value in self._filters):
-                out.append(CrudSnapshot(data, path[-1]))
-        return iter(out)
 
 
 class CrudRef:
@@ -560,15 +412,6 @@ class CrudRef:
         self._db = db
         self.path = tuple(path)
         self.id = self.path[-1]
-
-    def get(self):
-        return CrudSnapshot(self._db._store.get(self.path), self.id)
-
-    def set(self, data):
-        self._db._store[self.path] = dict(data)
-
-    def delete(self):
-        self._db._store.pop(self.path, None)
 
     def collection(self, name):
         return CrudCollection(self._db, self.path + (name,))
@@ -583,12 +426,6 @@ class CrudCollection:
         if doc_id is None:
             doc_id = f"auto-{next(self._db._ids)}"
         return CrudRef(self._db, self.path + (doc_id,))
-
-    def where(self, *args, **kwargs):
-        return CrudQuery(self._db, self.path, []).where(*args, **kwargs)
-
-    def stream(self):
-        return CrudQuery(self._db, self.path, []).stream()
 
 
 class CrudDb:
@@ -615,9 +452,8 @@ def crud_db(monkeypatch):
 
 
 def _seed_firestore_children(fs, bid, owner):
-    fs._store[("businesses", bid, "opportunities", "opp1")] = {"owner_id": owner}
-    fs._store[("businesses", bid, "opportunities", "opp2")] = {"owner_id": owner}
-    fs._store[("businesses", bid, "actions", "act1")] = {"owner_id": owner}
+    # Only the children still living in Firestore this slice (connections,
+    # gtm_runs). opportunities/actions/etc. are Postgres rows now.
     fs._store[("businesses", bid, "connections", "con1")] = {"owner_id": owner}
     fs._store[("businesses", bid, "gtm_runs", "gtm1")] = {"owner_id": owner}
 
@@ -627,6 +463,11 @@ def test_delete_cascades_subcollections(db_session, crud_db, client):
     uid = str(user.id)
     business = seed_business(db_session, owner_id=uid, website_url="https://acme.example")
     bid = str(business.id)
+    # Postgres children that must cascade-delete with the business row.
+    opp = seed_opportunity(db_session, bid, uid)
+    seed_action(db_session, bid, uid)
+    seed_agent_run(db_session, bid, uid)
+    # Firestore children that recursive_delete must still reap.
     _seed_firestore_children(crud_db, bid, uid)
     _login(client, uid)
 
@@ -634,8 +475,12 @@ def test_delete_cascades_subcollections(db_session, crud_db, client):
     assert resp.status_code == 200
     assert resp.get_json()["success"] is True
 
-    # Postgres row gone AND every Firestore subcollection doc gone.
+    # Postgres row gone AND its Postgres children cascaded.
     assert db_session.get(Business, bid) is None
+    assert db_session.query(Opportunity).filter_by(business_id=bid).count() == 0
+    assert db_session.query(Action).filter_by(business_id=bid).count() == 0
+    assert db_session.query(AgentRun).filter_by(business_id=bid).count() == 0
+    # Firestore connections/gtm_runs recursively deleted.
     remaining = [p for p in crud_db._store if p[:2] == ("businesses", bid)]
     assert remaining == []
 
@@ -675,3 +520,49 @@ def test_delete_unauthenticated_401(db_session, crud_db, client):
     assert resp.status_code == 401
     assert crud_db._store == before
     assert db_session.get(Business, bid) is not None
+
+
+# ─────────────────────────────────────────────────────────────
+# approve_action idempotency (replaces the @firestore.transactional): a double
+# approve creates exactly ONE execution, returns the SAME execution_id, and
+# enqueues the task exactly once.
+# ─────────────────────────────────────────────────────────────
+
+
+def test_double_approve_one_execution_same_id_enqueued_once(db_session, monkeypatch, client):
+    import routes.user as routes_user
+
+    user = seed_user(db_session)
+    uid = str(user.id)
+    business = seed_business(db_session, owner_id=uid, website_url="https://acme.example")
+    bid = str(business.id)
+    opp = seed_opportunity(db_session, bid, uid)
+    action = seed_action(
+        db_session, bid, uid, opportunity_id=opp.id, status="pending_approval",
+    )
+    aid = str(action.id)
+
+    enqueues = []
+
+    def fake_delay(business_id, execution_id):
+        enqueues.append(execution_id)
+        return type("T", (), {"id": f"task-{len(enqueues)}"})()
+
+    monkeypatch.setattr(routes_user.execute_approved_action, "delay", fake_delay)
+    _login(client, uid)
+
+    first = client.post(f"/api/business/{bid}/actions/{aid}/approve")
+    assert first.status_code == 202
+    first_body = first.get_json()
+    assert first_body["already_approved"] is False
+    exec_id = first_body["execution_id"]
+
+    second = client.post(f"/api/business/{bid}/actions/{aid}/approve")
+    assert second.status_code == 200
+    second_body = second.get_json()
+    assert second_body["already_approved"] is True
+    assert second_body["execution_id"] == exec_id
+
+    # Exactly one execution row, and the task was enqueued exactly once.
+    assert db_session.query(Execution).filter_by(action_id=aid).count() == 1
+    assert enqueues == [exec_id]

@@ -1,8 +1,28 @@
 from agent.decision_engine import generate_action
 from services.action_service import create_action
-from google.cloud.firestore_v1.base_query import FieldFilter
 
-from models import get_business_row
+from extensions import db
+from models import (
+    Action,
+    Opportunity,
+    action_to_dict,
+    get_business_row,
+    opportunity_to_dict,
+)
+
+
+# generate_actions_for_opportunities skips an opportunity that already has an
+# action in ANY of these states. This is deliberately BROADER than the 3 live
+# states the DB UNIQUE enforces: `completed` is included so a finished action is
+# never regenerated. That is a planner policy the constraint does not (and should
+# not) enforce, so it stays here in app code.
+_SKIP_REGENERATE_STATUSES = {
+    "pending_approval",
+    "approved",
+    "running",
+    "completed",
+}
+
 
 def create_action_from_opportunity(
     business_id,
@@ -22,8 +42,6 @@ def create_action_from_opportunity(
     if not isinstance(business_analysis, dict):
         raise ValueError("business_analysis must be a dictionary")
 
-    # Parent business lives in Postgres now; the opportunities subcollection
-    # stays on Firestore keyed by the id string (business_ref below).
     business = get_business_row(business_id)
 
     if business is None:
@@ -34,30 +52,17 @@ def create_action_from_opportunity(
             "Owner does not have access to this business"
         )
 
-    from firebase import db
+    opportunity_row = db.session.get(Opportunity, opportunity_id)
 
-    business_ref = (
-        db.collection("businesses")
-        .document(business_id)
-    )
-
-    opportunity_ref = (
-        business_ref
-        .collection("opportunities")
-        .document(opportunity_id)
-    )
-
-    opportunity_doc = opportunity_ref.get()
-
-    if not opportunity_doc.exists:
+    if opportunity_row is None:
         raise ValueError("Opportunity not found")
 
-    opportunity = opportunity_doc.to_dict()
-
-    if opportunity.get("owner_id") != owner_id:
+    if str(opportunity_row.owner_id) != owner_id:
         raise ValueError(
             "You do not have permission to use this opportunity"
         )
+
+    opportunity = opportunity_to_dict(opportunity_row)
 
     decision = generate_action(
         opportunity=opportunity,
@@ -93,8 +98,6 @@ def generate_actions_for_opportunities(
     if not isinstance(business_analysis, dict):
         raise ValueError("business_analysis must be a dictionary")
 
-    # Parent business lives in Postgres now; the opportunities subcollection
-    # stays on Firestore keyed by the id string (business_ref below).
     business = get_business_row(business_id)
 
     if business is None:
@@ -105,75 +108,39 @@ def generate_actions_for_opportunities(
             "Owner does not have access to this business"
         )
 
-    from firebase import db
-
-    business_ref = (
-        db.collection("businesses")
-        .document(business_id)
-    )
-
     if opportunity_ids is None:
-        opportunity_docs = (
-            business_ref
-            .collection("opportunities")
-            .where(
-                filter=FieldFilter(
-                    "status",
-                    "==",
-                    "identified",
-                )
+        opportunity_rows = (
+            db.session.query(Opportunity)
+            .filter_by(
+                business_id=business_id,
+                status="identified",
             )
-            .stream()
+            .all()
         )
     else:
-        opportunity_docs = []
+        opportunity_rows = []
 
         for opportunity_id in opportunity_ids:
-            opportunity_ref = (
-                business_ref
-                .collection("opportunities")
-                .document(opportunity_id)
-            )
+            opportunity_row = db.session.get(Opportunity, opportunity_id)
 
-            opportunity_doc = opportunity_ref.get()
-
-            if opportunity_doc.exists:
-                opportunity_docs.append(opportunity_doc)
+            if opportunity_row is not None:
+                opportunity_rows.append(opportunity_row)
 
     created_actions = []
     existing_actions = []
 
-    for opportunity_doc in opportunity_docs:
-        opportunity_id = opportunity_doc.id
-
-        existing_action_docs = (
-            business_ref
-            .collection("actions")
-            .where(
-                filter=FieldFilter(
-                    "opportunity_id",
-                    "==",
-                    opportunity_id,
-                )
-            )
-            .stream()
-        )
+    for opportunity_row in opportunity_rows:
+        opportunity_id = str(opportunity_row.id)
 
         existing_action = None
 
-        for action_doc in existing_action_docs:
-            action_data = action_doc.to_dict()
-
-            if action_data.get("status") in {
-                "pending_approval",
-                "approved",
-                "running",
-                "completed",
-            }:
-                existing_action = {
-                    "id": action_doc.id,
-                    **action_data,
-                }
+        for action_row in (
+            db.session.query(Action)
+            .filter_by(opportunity_id=opportunity_id)
+            .all()
+        ):
+            if action_row.status in _SKIP_REGENERATE_STATUSES:
+                existing_action = action_to_dict(action_row)
                 break
 
         if existing_action:
