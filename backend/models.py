@@ -9,9 +9,10 @@ onto the Supabase-foundation baseline.
 """
 
 import uuid as _uuid
+from decimal import Decimal as _Decimal
 
 from sqlalchemy import Index, text
-from sqlalchemy.dialects.postgresql import CITEXT, UUID
+from sqlalchemy.dialects.postgresql import CITEXT, JSONB, UUID
 
 from extensions import db
 
@@ -163,6 +164,300 @@ class Business(db.Model):
     )
 
 
+class AgentRun(db.Model):
+    """PR d-core: the `agent_runs` pipeline child. One row per analysis cycle.
+    The id was a Firestore auto-id used as the subcollection path segment; it is
+    now a DB-generated UUID and is also the PK that `observations.run_id`
+    references (one observation per run)."""
+
+    __tablename__ = "agent_runs"
+
+    id = db.Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    business_id = db.Column(
+        UUID(as_uuid=True),
+        db.ForeignKey("businesses.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    owner_id = db.Column(UUID(as_uuid=True))
+    type = db.Column(db.Text)
+    status = db.Column(db.Text)
+    analysis_status = db.Column(db.Text)
+    error = db.Column(db.Text)
+    task_id = db.Column(db.Text)
+    analysis_task_id = db.Column(db.Text)
+    observation_id = db.Column(UUID(as_uuid=True))
+    actions_created = db.Column(db.Integer)
+    actions_existing = db.Column(db.Integer)
+    opportunity_ids = db.Column(JSONB)
+    created_at = db.Column(
+        db.DateTime(timezone=True), nullable=False, server_default=db.func.now()
+    )
+    started_at = db.Column(db.DateTime(timezone=True))
+    cycle_started_at = db.Column(db.DateTime(timezone=True))
+    completed_at = db.Column(db.DateTime(timezone=True))
+    failed_at = db.Column(db.DateTime(timezone=True))
+    updated_at = db.Column(db.DateTime(timezone=True))
+
+
+class Observation(db.Model):
+    """PR d-core: the `observations` child. The Firestore doc id was the run_id
+    (deterministic, so an acks_late redelivery overwrites the same row); that is
+    preserved here as the PK which is also the FK to agent_runs(id)."""
+
+    __tablename__ = "observations"
+
+    run_id = db.Column(
+        UUID(as_uuid=True),
+        db.ForeignKey("agent_runs.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    business_id = db.Column(
+        UUID(as_uuid=True),
+        db.ForeignKey("businesses.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    owner_id = db.Column(UUID(as_uuid=True))
+    source_url = db.Column(db.Text)
+    final_url = db.Column(db.Text)
+    analysis_status = db.Column(db.Text)
+    analysis = db.Column(JSONB)
+    created_at = db.Column(
+        db.DateTime(timezone=True), nullable=False, server_default=db.func.now()
+    )
+
+
+class Opportunity(db.Model):
+    """PR d-core: the `opportunities` child. Partial UNIQUE
+    (business_id, type, problem_key) WHERE problem_key IS NOT NULL backstops the
+    #48 dedupe for new opportunities; the NULL-problem_key text-fallback dedupe
+    stays in find_existing_opportunity (app logic the constraint can't express)."""
+
+    __tablename__ = "opportunities"
+
+    id = db.Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    business_id = db.Column(
+        UUID(as_uuid=True),
+        db.ForeignKey("businesses.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    owner_id = db.Column(UUID(as_uuid=True))
+    title = db.Column(db.Text)
+    description = db.Column(db.Text)
+    problem_key = db.Column(db.Text)
+    problem = db.Column(db.Text)
+    potential_impact = db.Column(db.Text)
+    confidence = db.Column(db.Numeric)
+    type = db.Column(db.Text)
+    status = db.Column(db.Text)
+    evidence = db.Column(JSONB)
+    created_at = db.Column(
+        db.DateTime(timezone=True), nullable=False, server_default=db.func.now()
+    )
+    updated_at = db.Column(db.DateTime(timezone=True))
+
+    __table_args__ = (
+        Index(
+            "uq_opportunities_business_type_problemkey",
+            "business_id",
+            "type",
+            "problem_key",
+            unique=True,
+            postgresql_where=text("problem_key IS NOT NULL"),
+        ),
+    )
+
+
+class Action(db.Model):
+    """PR d-core: the `actions` child — the hub shared by analyze (writes it) and
+    approve/execute (chains it to executions). Most columns are NULLABLE and there
+    is a separate `title` column because dev/scaffolding routes
+    (create_dry_run_action, create_test_approval_action) write a sparser shape
+    with no opportunity_id. Partial UNIQUE (opportunity_id) WHERE status IN the 3
+    live states backstops the #48 one-live-action-per-opportunity dedupe; NULL
+    opportunity_id rows (dry-run/test) are distinct and never collide."""
+
+    __tablename__ = "actions"
+
+    id = db.Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    business_id = db.Column(
+        UUID(as_uuid=True),
+        db.ForeignKey("businesses.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    owner_id = db.Column(UUID(as_uuid=True))
+    opportunity_id = db.Column(
+        UUID(as_uuid=True),
+        db.ForeignKey("opportunities.id", ondelete="CASCADE"),
+    )
+    action_title = db.Column(db.Text)
+    title = db.Column(db.Text)
+    action_type = db.Column(db.Text)
+    objective = db.Column(db.Text)
+    description = db.Column(db.Text)
+    reasoning = db.Column(db.Text)
+    expected_outcome = db.Column(db.Text)
+    required_inputs = db.Column(JSONB)
+    requires_approval = db.Column(db.Boolean)
+    status = db.Column(db.Text)
+    content_type = db.Column(db.Text)
+    page_url = db.Column(db.Text)
+    content = db.Column(JSONB)
+    target_path = db.Column(db.Text)
+    execution_id = db.Column(UUID(as_uuid=True))
+    approved_by = db.Column(UUID(as_uuid=True))
+    rejected_by = db.Column(UUID(as_uuid=True))
+    error = db.Column(db.Text)
+    created_at = db.Column(
+        db.DateTime(timezone=True), nullable=False, server_default=db.func.now()
+    )
+    updated_at = db.Column(db.DateTime(timezone=True))
+    approved_at = db.Column(db.DateTime(timezone=True))
+    rejected_at = db.Column(db.DateTime(timezone=True))
+    completed_at = db.Column(db.DateTime(timezone=True))
+
+    __table_args__ = (
+        Index(
+            "uq_actions_opportunity_live",
+            "opportunity_id",
+            unique=True,
+            postgresql_where=text(
+                "status IN ('pending_approval', 'approved', 'running')"
+            ),
+        ),
+    )
+
+
+class Execution(db.Model):
+    """PR d-core: the `executions` child. Created at approve time (status
+    'queued'), driven to running/completed/failed by the execution engine."""
+
+    __tablename__ = "executions"
+
+    id = db.Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    business_id = db.Column(
+        UUID(as_uuid=True),
+        db.ForeignKey("businesses.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    owner_id = db.Column(UUID(as_uuid=True))
+    action_id = db.Column(UUID(as_uuid=True), index=True)
+    status = db.Column(db.Text)
+    task_id = db.Column(db.Text)
+    error = db.Column(db.Text)
+    result = db.Column(JSONB)
+    created_at = db.Column(
+        db.DateTime(timezone=True), nullable=False, server_default=db.func.now()
+    )
+    updated_at = db.Column(db.DateTime(timezone=True))
+    started_at = db.Column(db.DateTime(timezone=True))
+    completed_at = db.Column(db.DateTime(timezone=True))
+
+
+class Measurement(db.Model):
+    """PR d-core: the `measurements` child. Recorded by the execution engine on a
+    completed execution; drives learning generation."""
+
+    __tablename__ = "measurements"
+
+    id = db.Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    business_id = db.Column(
+        UUID(as_uuid=True),
+        db.ForeignKey("businesses.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_id = db.Column(
+        UUID(as_uuid=True),
+        db.ForeignKey("executions.id", ondelete="CASCADE"),
+        index=True,
+    )
+    action_id = db.Column(UUID(as_uuid=True))
+    metric = db.Column(db.Text)
+    value = db.Column(db.Numeric)
+    previous_value = db.Column(db.Numeric)
+    source = db.Column(db.Text)
+    measured_at = db.Column(db.DateTime(timezone=True))
+    created_at = db.Column(
+        db.DateTime(timezone=True), nullable=False, server_default=db.func.now()
+    )
+
+
+class Learning(db.Model):
+    """PR d-core: the `learnings` child. Partial UNIQUE (business_id,
+    measurement_id) WHERE measurement_id IS NOT NULL backstops the #48
+    one-learning-per-measurement idempotency (the Firestore doc(measurement_id)
+    + @firestore.transactional create-if-absent)."""
+
+    __tablename__ = "learnings"
+
+    id = db.Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    business_id = db.Column(
+        UUID(as_uuid=True),
+        db.ForeignKey("businesses.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_id = db.Column(
+        UUID(as_uuid=True),
+        db.ForeignKey("executions.id", ondelete="CASCADE"),
+        index=True,
+    )
+    action_id = db.Column(UUID(as_uuid=True))
+    action_type = db.Column(db.Text)
+    measurement_id = db.Column(UUID(as_uuid=True))
+    learning_type = db.Column(db.Text)
+    metric = db.Column(db.Text)
+    previous_value = db.Column(db.Numeric)
+    value = db.Column(db.Numeric)
+    direction = db.Column(db.Text)
+    observation = db.Column(db.Text)
+    outcome = db.Column(db.Text)
+    learning = db.Column(db.Text)
+    confidence = db.Column(db.Numeric)
+    created_at = db.Column(
+        db.DateTime(timezone=True), nullable=False, server_default=db.func.now()
+    )
+
+    __table_args__ = (
+        Index(
+            "uq_learnings_business_measurement",
+            "business_id",
+            "measurement_id",
+            unique=True,
+            postgresql_where=text("measurement_id IS NOT NULL"),
+        ),
+    )
+
+
 def _iso(value):
     """Serialize a timestamp column to the same naive-UTC ISO string the
     Firestore-era routes returned (datetime.utcnow().isoformat(), no tz offset).
@@ -202,3 +497,194 @@ def get_business_row(business_id):
     except (ValueError, TypeError, AttributeError):
         return None
     return db.session.get(Business, business_id)
+
+
+def _num(value):
+    """A Numeric column reads back as Decimal; mirror the JSON number shape the
+    Firestore era emitted — an integral value as int (measurement value=1 stayed
+    1), otherwise float. Non-Decimal values pass through unchanged."""
+    if value is None:
+        return None
+    if isinstance(value, _Decimal):
+        if value == value.to_integral_value():
+            return int(value)
+        return float(value)
+    return value
+
+
+def _float(value):
+    """confidence is coerced to float at write time (create_learning), so the
+    body always carried a float — emit one here too, never an int or Decimal."""
+    return None if value is None else float(value)
+
+
+def _str_id(value):
+    """UUID -> str for an id-shaped column, preserving None (so an unset FK such
+    as a dry-run action's opportunity_id stays absent/None, not 'None')."""
+    return None if value is None else str(value)
+
+
+def _put(body, key, value):
+    """Append a key only when its value is set, mirroring Firestore's to_dict,
+    which omits fields a document never had. Used for lifecycle/optional columns
+    that are NULL until a state transition writes them."""
+    if value is not None:
+        body[key] = value
+
+
+def agent_run_to_dict(row):
+    body = {
+        "id": str(row.id),
+        "business_id": str(row.business_id),
+        "owner_id": _str_id(row.owner_id),
+        "type": row.type,
+        "status": row.status,
+        "created_at": _iso(row.created_at),
+    }
+    _put(body, "analysis_status", row.analysis_status)
+    _put(body, "error", row.error)
+    _put(body, "task_id", row.task_id)
+    _put(body, "analysis_task_id", row.analysis_task_id)
+    _put(body, "observation_id", _str_id(row.observation_id))
+    _put(body, "actions_created", row.actions_created)
+    _put(body, "actions_existing", row.actions_existing)
+    _put(body, "opportunity_ids", row.opportunity_ids)
+    _put(body, "started_at", _iso(row.started_at))
+    _put(body, "cycle_started_at", _iso(row.cycle_started_at))
+    _put(body, "completed_at", _iso(row.completed_at))
+    _put(body, "updated_at", _iso(row.updated_at))
+    return body
+
+
+def observation_to_dict(row):
+    return {
+        "id": str(row.run_id),
+        "business_id": str(row.business_id),
+        "owner_id": _str_id(row.owner_id),
+        "source_url": row.source_url,
+        "final_url": row.final_url,
+        "analysis": row.analysis,
+        "analysis_status": row.analysis_status,
+        "created_at": _iso(row.created_at),
+    }
+
+
+def opportunity_to_dict(row):
+    return {
+        "id": str(row.id),
+        "business_id": str(row.business_id),
+        "owner_id": _str_id(row.owner_id),
+        "title": row.title,
+        "description": row.description,
+        "problem_key": row.problem_key,
+        "problem": row.problem,
+        "evidence": row.evidence,
+        "potential_impact": row.potential_impact,
+        "confidence": _num(row.confidence),
+        "type": row.type,
+        "status": row.status,
+        "created_at": _iso(row.created_at),
+        "updated_at": _iso(row.updated_at),
+    }
+
+
+def action_to_dict(row):
+    """Both pipeline actions and the sparser dev/scaffolding actions (dry-run,
+    test-approval) read back through here, and each must match the Firestore doc
+    it carried.
+
+    A pipeline action (created via create_action off an opportunity) always wrote
+    all four content fields — content_type/page_url/content/target_path — even
+    when the decision engine left them None (validate_action requires the keys,
+    values may be None), so GET returned them as null. The dev routes never wrote
+    those keys at all. `opportunity_id IS NOT NULL` is the structural marker that
+    tells the two apart, so the content block is emitted (null-inclusive) only for
+    pipeline actions. Every other field is omitted when NULL, mirroring Firestore
+    dropping fields a document never had."""
+    is_pipeline = row.opportunity_id is not None
+
+    body = {
+        "id": str(row.id),
+        "business_id": str(row.business_id),
+        "owner_id": _str_id(row.owner_id),
+        "status": row.status,
+    }
+    _put(body, "opportunity_id", _str_id(row.opportunity_id))
+    _put(body, "action_title", row.action_title)
+    _put(body, "title", row.title)
+    _put(body, "action_type", row.action_type)
+    _put(body, "objective", row.objective)
+    _put(body, "description", row.description)
+    _put(body, "reasoning", row.reasoning)
+    _put(body, "expected_outcome", row.expected_outcome)
+    _put(body, "required_inputs", row.required_inputs)
+    _put(body, "requires_approval", row.requires_approval)
+    if is_pipeline:
+        body["content_type"] = row.content_type
+        body["page_url"] = row.page_url
+        body["content"] = row.content
+        body["target_path"] = row.target_path
+    _put(body, "execution_id", _str_id(row.execution_id))
+    _put(body, "approved_by", _str_id(row.approved_by))
+    _put(body, "rejected_by", _str_id(row.rejected_by))
+    _put(body, "error", row.error)
+    _put(body, "created_at", _iso(row.created_at))
+    _put(body, "updated_at", _iso(row.updated_at))
+    _put(body, "approved_at", _iso(row.approved_at))
+    _put(body, "rejected_at", _iso(row.rejected_at))
+    _put(body, "completed_at", _iso(row.completed_at))
+    return body
+
+
+def execution_to_dict(row):
+    body = {
+        "id": str(row.id),
+        "business_id": str(row.business_id),
+        "owner_id": _str_id(row.owner_id),
+        "action_id": _str_id(row.action_id),
+        "status": row.status,
+        "created_at": _iso(row.created_at),
+    }
+    _put(body, "task_id", row.task_id)
+    _put(body, "error", row.error)
+    _put(body, "result", row.result)
+    _put(body, "updated_at", _iso(row.updated_at))
+    _put(body, "started_at", _iso(row.started_at))
+    _put(body, "completed_at", _iso(row.completed_at))
+    return body
+
+
+def measurement_to_dict(row):
+    return {
+        "id": str(row.id),
+        "business_id": str(row.business_id),
+        "execution_id": _str_id(row.execution_id),
+        "action_id": _str_id(row.action_id),
+        "metric": row.metric,
+        "value": _num(row.value),
+        "source": row.source,
+        "previous_value": _num(row.previous_value),
+        "measured_at": _iso(row.measured_at),
+        "created_at": _iso(row.created_at),
+    }
+
+
+def learning_to_dict(row):
+    return {
+        "id": str(row.id),
+        "business_id": str(row.business_id),
+        "execution_id": _str_id(row.execution_id),
+        "action_id": _str_id(row.action_id),
+        "action_type": row.action_type,
+        "measurement_id": _str_id(row.measurement_id),
+        "learning_type": row.learning_type,
+        "metric": row.metric,
+        "previous_value": _num(row.previous_value),
+        "value": _num(row.value),
+        "direction": row.direction,
+        "observation": row.observation,
+        "outcome": row.outcome,
+        "learning": row.learning,
+        "confidence": _float(row.confidence),
+        "created_at": _iso(row.created_at),
+    }

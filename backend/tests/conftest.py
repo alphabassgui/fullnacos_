@@ -102,7 +102,9 @@ def db_session(flask_app):
             db.session.rollback()
             db.session.execute(
                 sa.text(
-                    "TRUNCATE users, user_sessions, security_logs CASCADE"
+                    "TRUNCATE users, user_sessions, security_logs, "
+                    "businesses, agent_runs, observations, opportunities, "
+                    "actions, executions, measurements, learnings CASCADE"
                 )
             )
             db.session.commit()

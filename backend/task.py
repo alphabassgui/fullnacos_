@@ -9,7 +9,10 @@ from redis.exceptions import (
 from kombu.exceptions import OperationalError as KombuOperationalError
 from firebase_admin import firestore
 from firebase import db
-from models import get_business_row
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+from extensions import db as orm_db
+from models import AgentRun, Observation, get_business_row
 from website_analyzer import fetch_website_html, analyze_html
 from services.execution_engine import execute_action
 
@@ -109,32 +112,31 @@ def execute_approved_action(
 
 @celery.task(bind=True, name="tasks.analyze_business_website", **RETRY_OPTS)
 def analyze_business_website(self, business_id, user_id, run_id):
-    business_ref = db.collection("businesses").document(business_id)
-    run_ref = business_ref.collection("agent_runs").document(run_id)
+    # The analyze_business route always pre-creates the agent_run row before
+    # dispatching this task, so run is present here. (observations.run_id FKs
+    # agent_runs.id, so the run must exist before the observation upsert.)
+    run = orm_db.session.get(AgentRun, run_id)
 
-    # Parent business now lives in Postgres; its children (agent_runs,
-    # observations, opportunities, ...) stay on Firestore keyed by the id string.
+    def _fail_run(error):
+        if run is not None:
+            run.analysis_status = "failed"
+            run.status = "failed"
+            run.error = error
+            run.completed_at = datetime.utcnow()
+            orm_db.session.commit()
+
+    # Parent business now lives in Postgres alongside its children.
     business = get_business_row(business_id)
 
     if business is None:
-        run_ref.update({
-            "analysis_status": "failed",
-            "status": "failed",
-            "error": "Business not found",
-            "completed_at": datetime.utcnow().isoformat(),
-        })
+        _fail_run("Business not found")
         return {
             "success": False,
             "error": "Business not found",
         }
 
     if str(business.owner_id) != user_id:
-        run_ref.update({
-            "analysis_status": "failed",
-            "status": "failed",
-            "error": "Unauthorized",
-            "completed_at": datetime.utcnow().isoformat(),
-        })
+        _fail_run("Unauthorized")
         return {
             "success": False,
             "error": "Unauthorized",
@@ -143,12 +145,7 @@ def analyze_business_website(self, business_id, user_id, run_id):
     website_url = business.website_url
 
     if not website_url:
-        run_ref.update({
-            "analysis_status": "failed",
-            "status": "failed",
-            "error": "Business has no website URL",
-            "completed_at": datetime.utcnow().isoformat(),
-        })
+        _fail_run("Business has no website URL")
         return {
             "success": False,
             "error": "Business has no website URL",
@@ -156,10 +153,10 @@ def analyze_business_website(self, business_id, user_id, run_id):
 
     try:
         # Mark job as running
-        run_ref.update({
-            "analysis_status": "running",
-            "started_at": datetime.utcnow().isoformat(),
-        })
+        if run is not None:
+            run.analysis_status = "running"
+            run.started_at = datetime.utcnow()
+            orm_db.session.commit()
 
         # Fetch website. A blocked (403/429), unreachable, or otherwise
         # non-200 site must end the run in a clean failed state the frontend
@@ -169,12 +166,7 @@ def analyze_business_website(self, business_id, user_id, run_id):
         try:
             html, final_url = fetch_website_html(website_url)
         except Exception as exc:
-            run_ref.update({
-                "analysis_status": "failed",
-                "status": "failed",
-                "error": str(exc),
-                "completed_at": datetime.utcnow().isoformat(),
-            })
+            _fail_run(str(exc))
             return {
                 "success": False,
                 "error": str(exc),
@@ -195,14 +187,38 @@ def analyze_business_website(self, business_id, user_id, run_id):
         }
 
         # Deterministic id keyed on run_id: a task redelivery (acks_late) must
-        # overwrite the same observation doc, not append a duplicate.
-        observation_ref = (
-            business_ref
-            .collection("observations")
-            .document(run_id)
+        # overwrite the same observation row, not append a duplicate. The PK
+        # ON CONFLICT upsert replaces the @firestore set(run_id) behavior.
+        now = datetime.utcnow()
+        stmt = (
+            pg_insert(Observation)
+            .values(
+                run_id=run_id,
+                business_id=business_id,
+                owner_id=user_id,
+                source_url=website_url,
+                final_url=final_url,
+                analysis=analysis,
+                analysis_status="completed",
+                created_at=now,
+            )
+            .on_conflict_do_update(
+                index_elements=["run_id"],
+                set_={
+                    "business_id": business_id,
+                    "owner_id": user_id,
+                    "source_url": website_url,
+                    "final_url": final_url,
+                    "analysis": analysis,
+                    "analysis_status": "completed",
+                    "created_at": now,
+                },
+            )
         )
+        orm_db.session.execute(stmt)
+        orm_db.session.commit()
 
-        observation_ref.set(observation)
+        observation_id = run_id
 
         # Step 4-7: business understanding + opportunities.
         # Lazy imports avoid constructing a Groq() client when task.py loads.
@@ -249,29 +265,26 @@ def analyze_business_website(self, business_id, user_id, run_id):
             )
 
             # Single terminal completed transition
-            run_ref.update({
-                "analysis_status": "completed",
-                "status": "awaiting_approval",
-                "observation_id": observation_ref.id,
-                "opportunity_ids": opportunity_ids,
-                "actions_created": planner_result.get("actions_created", 0),
-                "actions_existing": planner_result.get("actions_existing", 0),
-                "completed_at": datetime.utcnow().isoformat(),
-                "updated_at": datetime.utcnow().isoformat(),
-            })
-            
+            if run is not None:
+                completed_now = datetime.utcnow()
+                run.analysis_status = "completed"
+                run.status = "awaiting_approval"
+                run.observation_id = observation_id
+                run.opportunity_ids = opportunity_ids
+                run.actions_created = planner_result.get("actions_created", 0)
+                run.actions_existing = planner_result.get("actions_existing", 0)
+                run.completed_at = completed_now
+                run.updated_at = completed_now
+                orm_db.session.commit()
+
         except Exception as exc:
-            run_ref.update({
-                "analysis_status": "failed",
-                "status": "failed",
-                "error": str(exc),
-                "completed_at": datetime.utcnow().isoformat(),
-            })
+            orm_db.session.rollback()
+            _fail_run(str(exc))
             raise
 
         return {
             "success": True,
-            "observation_id": observation_ref.id,
+            "observation_id": observation_id,
             "opportunity_ids": opportunity_ids,
             "actions_created": planner_result["actions_created"],
             "actions_existing": planner_result["actions_existing"],
@@ -280,31 +293,20 @@ def analyze_business_website(self, business_id, user_id, run_id):
 
     except Exception as exc:
         # Mark run as failed
-        run_ref.update({
-            "analysis_status": "failed",
-            "status": "failed",
-            "error": str(exc),
-            "completed_at": datetime.utcnow().isoformat(),
-        })
+        orm_db.session.rollback()
+        _fail_run(str(exc))
 
         raise
 
 @celery.task(bind=True, name="tasks.run_agent_cycle", **RETRY_OPTS)
 def run_agent_cycle(self, business_id, user_id, run_id):
-    run_ref = (
-        db.collection("businesses")
-        .document(business_id)
-        .collection("agent_runs")
-        .document(run_id)
-    )
+    run = orm_db.session.get(AgentRun, run_id)
 
     # Idempotency: if a prior delivery already dispatched the analysis child
     # (analysis_task_id is the dispatch marker set after the first .delay), a
     # redelivery of run_agent_cycle must NOT enqueue a second child. Missing run
-    # doc -> {} -> proceed normally (don't crash).
-    run_doc = run_ref.get()
-    run_data = run_doc.to_dict() if run_doc.exists else {}
-    existing_task_id = run_data.get("analysis_task_id")
+    # row -> {} -> proceed normally (don't crash).
+    existing_task_id = run.analysis_task_id if run is not None else None
     if existing_task_id:
         return {
             "success": True,
@@ -313,11 +315,11 @@ def run_agent_cycle(self, business_id, user_id, run_id):
             "already_dispatched": True,
         }
 
-    run_ref.update({
-        "status": "running",
-        "analysis_status": "queued",
-        "cycle_started_at": datetime.utcnow().isoformat(),
-    })
+    if run is not None:
+        run.status = "running"
+        run.analysis_status = "queued"
+        run.cycle_started_at = datetime.utcnow()
+        orm_db.session.commit()
 
     try:
         result = analyze_business_website.delay(
@@ -326,11 +328,11 @@ def run_agent_cycle(self, business_id, user_id, run_id):
             run_id=run_id,
         )
 
-        run_ref.update({
-            "analysis_task_id": result.id,
-            "analysis_status": "queued",
-            "updated_at": datetime.utcnow().isoformat(),
-        })
+        if run is not None:
+            run.analysis_task_id = result.id
+            run.analysis_status = "queued"
+            run.updated_at = datetime.utcnow()
+            orm_db.session.commit()
 
         return {
             "success": True,
@@ -339,11 +341,12 @@ def run_agent_cycle(self, business_id, user_id, run_id):
         }
 
     except Exception as exc:
-        run_ref.update({
-            "status": "failed",
-            "error": str(exc),
-            "completed_at": datetime.utcnow().isoformat(),
-        })
+        if run is not None:
+            orm_db.session.rollback()
+            run.status = "failed"
+            run.error = str(exc)
+            run.completed_at = datetime.utcnow()
+            orm_db.session.commit()
         raise
 
 

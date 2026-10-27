@@ -1,8 +1,38 @@
+import uuid as _uuid
 from datetime import datetime
-from google.cloud.firestore_v1.base_query import FieldFilter
-from firebase import db
 
-from models import get_business_row
+from sqlalchemy.exc import IntegrityError
+
+from extensions import db
+from models import Action, Opportunity, action_to_dict, get_business_row
+
+
+# The 3 "live" states: while an action is in one of these, the opportunity it
+# belongs to must not get a second action. This is both the Python dedupe check
+# below and the partial UNIQUE(opportunity_id) predicate backing it in the DB.
+_LIVE_STATUSES = {"pending_approval", "approved", "running"}
+
+
+def _get_opportunity(opportunity_id):
+    """Fetch an opportunity by id, returning None for a malformed/non-UUID id so
+    the caller raises the same "Opportunity not found" it did when the Firestore
+    doc was absent."""
+    try:
+        _uuid.UUID(str(opportunity_id))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return db.session.get(Opportunity, opportunity_id)
+
+
+def _existing_live_action(opportunity_id):
+    for existing in (
+        db.session.query(Action)
+        .filter_by(opportunity_id=opportunity_id)
+        .all()
+    ):
+        if existing.status in _LIVE_STATUSES:
+            return existing
+    return None
 
 
 def create_action(
@@ -19,10 +49,10 @@ def create_action(
 
     if not opportunity_id:
         raise ValueError("opportunity_id is required")
-            
+
     if not isinstance(action, dict):
         raise ValueError("action must be a dictionary")
-    
+
     required_fields = {
         "action_title",
         "action_type",
@@ -42,8 +72,6 @@ def create_action(
             f"{sorted(missing_fields)}"
         )
 
-    # Parent business lives in Postgres now; the opportunities/actions
-    # subcollections stay on Firestore keyed by the id string (business_ref).
     business = get_business_row(business_id)
 
     if business is None:
@@ -54,87 +82,65 @@ def create_action(
             "Owner does not have access to this business"
         )
 
-    business_ref = db.collection("businesses").document(business_id)
+    opportunity = _get_opportunity(opportunity_id)
 
-    opportunity_ref = (
-        business_ref
-        .collection("opportunities")
-        .document(opportunity_id)
-    )
-
-    opportunity_doc = opportunity_ref.get()
-
-    if not opportunity_doc.exists:
+    if opportunity is None:
         raise ValueError("Opportunity not found")
 
-    opportunity = opportunity_doc.to_dict()
-
-    if opportunity.get("owner_id") != owner_id:
-            raise ValueError(
-                "You do not have permission to use this opportunity"
-            )
-            
-    
-    existing_action_docs = (
-        business_ref
-        .collection("actions")
-        .where(
-            filter=FieldFilter(
-                "opportunity_id",
-                "==",
-                opportunity_id,
-            )
+    if str(opportunity.owner_id) != owner_id:
+        raise ValueError(
+            "You do not have permission to use this opportunity"
         )
-        .stream()
+
+    existing_live = _existing_live_action(opportunity_id)
+
+    if existing_live is not None:
+        return {
+            **action_to_dict(existing_live),
+            "already_exists": True,
+        }
+
+    now = datetime.utcnow()
+
+    row = Action(
+        business_id=business_id,
+        owner_id=owner_id,
+        opportunity_id=opportunity_id,
+        action_title=action["action_title"],
+        action_type=action["action_type"],
+        objective=action["objective"],
+        description=action["description"],
+        reasoning=action["reasoning"],
+        expected_outcome=action["expected_outcome"],
+        required_inputs=action["required_inputs"],
+        requires_approval=action["requires_approval"],
+        status="pending_approval",
+        content_type=action["content_type"],
+        page_url=action["page_url"],
+        content=action["content"],
+        target_path=action["target_path"],
+        created_at=now,
+        updated_at=now,
     )
 
-    for action_doc in existing_action_docs:
-        existing_action = action_doc.to_dict()
+    db.session.add(row)
 
-        if existing_action.get("status") in {
-            "pending_approval",
-            "approved",
-            "running",
-        }:
+    try:
+        db.session.commit()
+    except IntegrityError:
+        # A concurrent insert won the partial UNIQUE(opportunity_id) WHERE-live
+        # race. Return the existing live action with the same already_exists
+        # contract rather than surfacing the DB error.
+        db.session.rollback()
+        existing_live = _existing_live_action(opportunity_id)
+        if existing_live is not None:
             return {
-                "id": action_doc.id,
-                **existing_action,
+                **action_to_dict(existing_live),
                 "already_exists": True,
             }
-    
-    now = datetime.utcnow().isoformat()
-
-    action_data = {
-        "business_id": business_id,
-        "owner_id": owner_id,
-        "opportunity_id": opportunity_id,
-        "action_title": action["action_title"],
-        "action_type": action["action_type"],
-        "objective": action["objective"],
-        "description": action["description"],
-        "reasoning": action["reasoning"],
-        "expected_outcome": action["expected_outcome"],
-        "required_inputs": action["required_inputs"],
-        "requires_approval": action["requires_approval"],
-        "status": "pending_approval",
-        "content_type": action["content_type"],
-        "page_url": action["page_url"],
-        "content": action["content"],
-        "target_path": action["target_path"],
-        "created_at": now,
-        "updated_at": now,
-    }
-
-    action_ref = (
-        business_ref
-        .collection("actions")
-        .document()
-    )
-
-    action_ref.set(action_data)
+        raise
 
     return {
-        "id": action_ref.id,
-        **action_data,
+        **action_to_dict(row),
         "already_exists": False,
     }

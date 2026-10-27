@@ -1,9 +1,11 @@
 from datetime import datetime
 import re
-from firebase import db
-from google.cloud.firestore_v1.base_query import FieldFilter
 
-from models import get_business_row
+from sqlalchemy.exc import IntegrityError
+
+from extensions import db
+from models import Opportunity, get_business_row, opportunity_to_dict
+
 
 def _normalize_text(value):
     if not value:
@@ -47,8 +49,6 @@ def create_opportunity(
             f"{sorted(missing_fields)}"
         )
 
-    # Parent business lives in Postgres now; the opportunities subcollection
-    # stays on Firestore keyed by the id string (business_ref below).
     business = get_business_row(business_id)
 
     if business is None:
@@ -58,11 +58,6 @@ def create_opportunity(
         raise ValueError(
             "Owner does not have access to this business"
         )
-
-    business_ref = (
-        db.collection("businesses")
-        .document(business_id)
-    )
 
     existing_opportunity = find_existing_opportunity(
         business_id=business_id,
@@ -75,35 +70,46 @@ def create_opportunity(
             "already_exists": True,
         }
 
-    now = datetime.utcnow().isoformat()
+    now = datetime.utcnow()
 
-    opportunity_data = {
-        "business_id": business_id,
-        "owner_id": owner_id,
-        "title": opportunity["title"],
-        "description": opportunity["description"],
-        "problem_key": opportunity.get("problem_key"),
-        "problem": opportunity["problem"],
-        "evidence": opportunity["evidence"],
-        "potential_impact": opportunity["potential_impact"],
-        "confidence": opportunity["confidence"],
-        "type": opportunity["type"],
-        "status": "identified",
-        "created_at": now,
-        "updated_at": now,
-    }
-
-    opportunity_ref = (
-        business_ref
-        .collection("opportunities")
-        .document()
+    row = Opportunity(
+        business_id=business_id,
+        owner_id=owner_id,
+        title=opportunity["title"],
+        description=opportunity["description"],
+        problem_key=opportunity.get("problem_key"),
+        problem=opportunity["problem"],
+        evidence=opportunity["evidence"],
+        potential_impact=opportunity["potential_impact"],
+        confidence=opportunity["confidence"],
+        type=opportunity["type"],
+        status="identified",
+        created_at=now,
+        updated_at=now,
     )
 
-    opportunity_ref.set(opportunity_data)
+    db.session.add(row)
+
+    try:
+        db.session.commit()
+    except IntegrityError:
+        # A concurrent insert won the partial UNIQUE
+        # (business_id, type, problem_key) race. Return the existing row with the
+        # same already_exists contract rather than surfacing the DB error.
+        db.session.rollback()
+        existing_opportunity = find_existing_opportunity(
+            business_id=business_id,
+            opportunity=opportunity,
+        )
+        if existing_opportunity:
+            return {
+                **existing_opportunity,
+                "already_exists": True,
+            }
+        raise
 
     return {
-        "id": opportunity_ref.id,
-        **opportunity_data,
+        **opportunity_to_dict(row),
         "already_exists": False,
     }
 
@@ -124,52 +130,33 @@ def find_existing_opportunity(
     if not opportunity_type:
         return None
 
-    business_ref = (
-        db.collection("businesses")
-        .document(business_id)
-    )
-
-    opportunity_docs = (
-        business_ref
-        .collection("opportunities")
-        .where(
-            filter=FieldFilter(
-                "type",
-                "==",
-                opportunity_type,
-            )
+    existing_rows = (
+        db.session.query(Opportunity)
+        .filter_by(
+            business_id=business_id,
+            type=opportunity_type,
         )
-        .stream()
+        .all()
     )
 
     normalized_problem = _normalize_text(problem)
 
-    for opportunity_doc in opportunity_docs:
-        existing = opportunity_doc.to_dict()
-
-        existing_problem_key = existing.get("problem_key")
+    for existing in existing_rows:
+        existing_problem_key = existing.problem_key
 
         # New opportunities: use the stable problem key.
         if problem_key and existing_problem_key:
             if existing_problem_key == problem_key:
-                return {
-                    "id": opportunity_doc.id,
-                    **existing,
-                }
+                return opportunity_to_dict(existing)
 
         # Backward compatibility for old opportunities.
-        existing_problem = _normalize_text(
-            existing.get("problem")
-        )
+        existing_problem = _normalize_text(existing.problem)
 
         if (
             not problem_key
             and normalized_problem
             and existing_problem == normalized_problem
         ):
-            return {
-                "id": opportunity_doc.id,
-                **existing,
-            }
+            return opportunity_to_dict(existing)
 
     return None

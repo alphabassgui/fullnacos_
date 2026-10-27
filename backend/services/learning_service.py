@@ -1,10 +1,29 @@
+import uuid as _uuid
 from datetime import datetime
-from agent.learning_generator import generate_learning_from_measurement
-from firebase import db
-from firebase import db
-from google.cloud import firestore
 
-from models import get_business_row
+from sqlalchemy import text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+from agent.learning_generator import generate_learning_from_measurement
+
+from extensions import db
+from models import (
+    Action,
+    Execution,
+    Learning,
+    Measurement,
+    get_business_row,
+    learning_to_dict,
+)
+
+
+def _get_by_id(model, row_id):
+    try:
+        _uuid.UUID(str(row_id))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return db.session.get(model, row_id)
+
 
 def create_learning(
     business_id,
@@ -56,67 +75,31 @@ def create_learning(
     if confidence < 0 or confidence > 1:
         raise ValueError("confidence must be between 0 and 1")
 
-    # Parent business lives in Postgres now (existence-only check); the
-    # executions/actions/learnings subcollections stay on Firestore by id.
     if get_business_row(business_id) is None:
         raise ValueError("Business not found")
 
-    business_ref = (
-        db.collection("businesses")
-        .document(business_id)
-    )
+    execution = _get_by_id(Execution, execution_id)
 
-    execution_ref = (
-        business_ref
-        .collection("executions")
-        .document(execution_id)
-    )
-
-    execution_doc = execution_ref.get()
-
-    if not execution_doc.exists:
+    if execution is None:
         raise ValueError("Execution not found")
 
-    execution = execution_doc.to_dict()
-
-    action_id = execution.get("action_id")
+    action_id = execution.action_id
 
     if not action_id:
         raise ValueError("Execution has no action_id")
 
-    action_ref = (
-        business_ref
-        .collection("actions")
-        .document(action_id)
-    )
+    action = db.session.get(Action, action_id)
 
-    action_doc = action_ref.get()
-
-    if not action_doc.exists:
+    if action is None:
         raise ValueError("Action not found")
 
-    action = action_doc.to_dict()
+    now = datetime.utcnow()
 
-    now = datetime.utcnow().isoformat()
-
-    if measurement_id:
-        learning_ref = (
-            business_ref
-            .collection("learnings")
-            .document(measurement_id)
-        )
-    else:
-        learning_ref = (
-            business_ref
-            .collection("learnings")
-            .document()
-        )
-
-    learning_data = {
+    values = {
         "business_id": business_id,
         "execution_id": execution_id,
         "action_id": action_id,
-        "action_type": action.get("action_type"),
+        "action_type": action.action_type,
         "measurement_id": measurement_id,
         "learning_type": learning_type,
         "metric": metric,
@@ -131,46 +114,53 @@ def create_learning(
     }
 
     if measurement_id:
-        transaction = db.transaction()
+        # Idempotent create-if-absent (replaces the @firestore.transactional on
+        # doc(measurement_id)). The partial UNIQUE(business_id, measurement_id)
+        # WHERE measurement_id IS NOT NULL makes a redelivery a no-op; we then
+        # read the existing row back and return it with already_exists=True, the
+        # same contract measurement_service/execution_engine consume.
+        stmt = (
+            pg_insert(Learning)
+            .values(**values)
+            .on_conflict_do_nothing(
+                index_elements=["business_id", "measurement_id"],
+                index_where=text("measurement_id IS NOT NULL"),
+            )
+            .returning(Learning.id)
+        )
 
-        @firestore.transactional
-        def create_learning_transaction(transaction):
-            snapshot = learning_ref.get(transaction=transaction)
+        inserted_id = db.session.execute(stmt).scalar()
+        db.session.commit()
 
-            if snapshot.exists:
-                return {
-                    "already_exists": True,
-                    "learning": {
-                        "id": snapshot.id,
-                        **snapshot.to_dict(),
-                    },
-                }
-
-            transaction.create(
-                learning_ref,
-                learning_data,
+        if inserted_id is None:
+            existing = (
+                db.session.query(Learning)
+                .filter_by(
+                    business_id=business_id,
+                    measurement_id=measurement_id,
+                )
+                .first()
             )
 
             return {
-                "already_exists": False,
-                "learning": {
-                    "id": learning_ref.id,
-                    **learning_data,
-                },
+                **learning_to_dict(existing),
+                "already_exists": True,
             }
 
-        result = create_learning_transaction(transaction)
+        row = db.session.get(Learning, inserted_id)
 
         return {
-            **result["learning"],
-            "already_exists": result["already_exists"],
+            **learning_to_dict(row),
+            "already_exists": False,
         }
 
-    learning_ref.set(learning_data)
+    row = Learning(**values)
+
+    db.session.add(row)
+    db.session.commit()
 
     return {
-        "id": learning_ref.id,
-        **learning_data,
+        **learning_to_dict(row),
         "already_exists": False,
     }
 
@@ -192,43 +182,30 @@ def create_learning_from_measurement(
     if not measurement_id:
         raise ValueError("measurement_id is required")
 
-    # Parent business lives in Postgres now (existence-only check); the
-    # measurements subcollection stays on Firestore by id.
     if get_business_row(business_id) is None:
         raise ValueError("Business not found")
 
-    business_ref = (
-        db.collection("businesses")
-        .document(business_id)
-    )
+    measurement = _get_by_id(Measurement, measurement_id)
 
-    measurement_ref = (
-        business_ref
-        .collection("measurements")
-        .document(measurement_id)
-    )
-
-    measurement_doc = measurement_ref.get()
-
-    if not measurement_doc.exists:
+    if measurement is None:
         raise ValueError("Measurement not found")
 
-    measurement = measurement_doc.to_dict()
-
-    execution_id = measurement.get("execution_id")
+    execution_id = measurement.execution_id
 
     if not execution_id:
         raise ValueError(
             "Measurement has no execution_id"
         )
 
+    from models import measurement_to_dict
+
     generated_learning = generate_learning_from_measurement(
-        measurement
+        measurement_to_dict(measurement)
     )
 
     return create_learning(
         business_id=business_id,
-        execution_id=execution_id,
+        execution_id=str(execution_id),
         observation=generated_learning["observation"],
         outcome=generated_learning["outcome"],
         learning=generated_learning["learning"],
@@ -240,7 +217,7 @@ def create_learning_from_measurement(
         direction=generated_learning.get("direction"),
         measurement_id=measurement_id,
     )
-    
+
 def get_business_learnings(
     business_id,
     limit=20,
@@ -262,32 +239,18 @@ def get_business_learnings(
     if limit <= 0:
         raise ValueError("limit must be greater than 0")
 
-    # Parent business lives in Postgres now (existence-only check); the
-    # learnings subcollection stays on Firestore by id.
     if get_business_row(business_id) is None:
         raise ValueError("Business not found")
 
-    business_ref = (
-        db.collection("businesses")
-        .document(business_id)
-    )
-
-    learnings_query = (
-        business_ref
-        .collection("learnings")
-        .order_by("created_at", direction="DESCENDING")
+    rows = (
+        db.session.query(Learning)
+        .filter_by(business_id=business_id)
+        .order_by(Learning.created_at.desc())
         .limit(limit)
+        .all()
     )
 
-    learnings = []
-
-    for doc in learnings_query.stream():
-        learning = doc.to_dict()
-
-        learnings.append({
-            "id": doc.id,
-            **learning,
-        })
+    learnings = [learning_to_dict(row) for row in rows]
 
     if action_type:
         learnings = [
@@ -295,7 +258,7 @@ def get_business_learnings(
             for learning in learnings
             if learning.get("action_type") == action_type
         ]
-    
+
     if learning_type:
         learnings = [
             learning
@@ -304,4 +267,3 @@ def get_business_learnings(
         ]
 
     return learnings
-

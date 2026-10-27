@@ -1,9 +1,19 @@
+import uuid as _uuid
 from datetime import datetime
+
 from agent.learning_generator import generate_learning_from_measurement
 from services.learning_service import create_learning
-from firebase import db
 
-from models import get_business_row
+from extensions import db
+from models import Execution, Measurement, get_business_row, measurement_to_dict
+
+
+def _get_execution(execution_id):
+    try:
+        _uuid.UUID(str(execution_id))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return db.session.get(Execution, execution_id)
 
 
 def record_measurement(
@@ -43,47 +53,33 @@ def record_measurement(
     if not source:
         raise ValueError("source is required")
 
-    # Parent business lives in Postgres now (existence-only check here); the
-    # executions/measurements subcollections stay on Firestore keyed by the id.
     if get_business_row(business_id) is None:
         raise ValueError("Business not found")
 
-    business_ref = db.collection("businesses").document(business_id)
+    execution = _get_execution(execution_id)
 
-    execution_ref = (
-        business_ref
-        .collection("executions")
-        .document(execution_id)
-    )
-
-    execution_doc = execution_ref.get()
-
-    if not execution_doc.exists:
+    if execution is None:
         raise ValueError("Execution not found")
 
-    execution = execution_doc.to_dict()
+    now = datetime.utcnow()
 
-    now = datetime.utcnow().isoformat()
-
-    measurement_ref = (
-        business_ref
-        .collection("measurements")
-        .document()
+    row = Measurement(
+        business_id=business_id,
+        execution_id=execution_id,
+        action_id=execution.action_id,
+        metric=metric,
+        value=value,
+        source=source,
+        previous_value=previous_value,
+        measured_at=now,
+        created_at=now,
     )
 
-    measurement = {
-        "business_id": business_id,
-        "execution_id": execution_id,
-        "action_id": execution.get("action_id"),
-        "metric": metric,
-        "value": value,
-        "source": source,
-        "previous_value": previous_value,
-        "measured_at": now,
-        "created_at": now,
-    }
+    db.session.add(row)
+    db.session.commit()
 
-    measurement_ref.set(measurement)
+    measurement = measurement_to_dict(row)
+
     learning = generate_learning_from_measurement(measurement)
 
     learning_record = create_learning(
@@ -101,7 +97,6 @@ def record_measurement(
     )
 
     return {
-        "id": measurement_ref.id,
         **measurement,
         "learning": learning_record,
     }

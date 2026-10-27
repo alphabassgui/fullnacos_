@@ -13,9 +13,39 @@ from google.cloud import firestore
 from task import execute_approved_action
 from validations import validate_website_url
 from extensions import db as orm_db
-from models import Business, business_to_dict, get_business_row
+from models import (
+    Action,
+    AgentRun,
+    Business,
+    Execution,
+    Learning,
+    Measurement,
+    Opportunity,
+    _iso,
+    action_to_dict,
+    business_to_dict,
+    execution_to_dict,
+    get_business_row,
+    learning_to_dict,
+    measurement_to_dict,
+    opportunity_to_dict,
+)
 
 user_bp = Blueprint("user", __name__, template_folder="../templates")
+
+
+def _get_child(model, row_id, business_id):
+    """Fetch a pipeline child row by id, scoped to its business. A malformed
+    (non-UUID) id or a row under a different business returns None, preserving
+    the 404 the Firestore business/<id>/<collection>/<row_id> path produced."""
+    try:
+        uuid.UUID(str(row_id))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    row = orm_db.session.get(model, row_id)
+    if row is None or str(row.business_id) != str(business_id):
+        return None
+    return row
 
 # ─────────────────────────────────────────────────────────────
 # Business page
@@ -310,13 +340,13 @@ def delete_business(business_id):
     # ─────────────────────────────────────────────────────────
     # Transitional delete (children still on Firestore this slice)
     #
-    # Delete the Postgres business row, then recursively delete the
-    # Firestore children addressed by the SAME business id string. Firestore
-    # does NOT delete subcollections when a parent doc is deleted (and the
-    # parent doc no longer lives there anyway), so recursive_delete is still
-    # required to remove the orphaned subcollections (opportunities, actions,
-    # executions, measurements, learnings, connections, gtm_runs, agent_runs,
-    # observations). Full single-store cascade is a later slice.
+    # Delete the Postgres business row (its pipeline children — agent_runs,
+    # observations, opportunities, actions, executions, measurements, learnings
+    # — reap via ON DELETE CASCADE), then recursively delete the Firestore
+    # children still living there this slice (connections, gtm_runs), addressed
+    # by the SAME business id string. Firestore does NOT delete subcollections
+    # when a parent doc is removed, so recursive_delete is still required for
+    # those. Full single-store cascade is a later slice.
     # ─────────────────────────────────────────────────────────
 
     orm_db.session.delete(business)
@@ -351,7 +381,6 @@ def analyze_business(business_id):
             "error": "Authentication required"
         }), 401
 
-    business_ref = db.collection("businesses").document(business_id)
     business = get_business_row(business_id)
 
     if business is None:
@@ -372,22 +401,19 @@ def analyze_business(business_id):
             "error": "This business does not have a website URL"
         }), 400
 
-    # Create a run record
-    run_ref = (
-        business_ref
-        .collection("agent_runs")
-        .document()
+    # Create a run record. Pre-created here (before dispatch) so the task's
+    # observation upsert (observations.run_id FK -> agent_runs.id) resolves.
+    run = AgentRun(
+        business_id=business_id,
+        owner_id=user_id,
+        type="website_analysis",
+        status="queued",
+        created_at=datetime.utcnow(),
     )
+    orm_db.session.add(run)
+    orm_db.session.commit()
 
-    run_id = run_ref.id
-
-    run_ref.set({
-        "business_id": business_id,
-        "owner_id": user_id,
-        "type": "website_analysis",
-        "status": "queued",
-        "created_at": datetime.utcnow().isoformat(),
-    })
+    run_id = str(run.id)
 
     # Send background job to Celery
     try:
@@ -397,11 +423,10 @@ def analyze_business(business_id):
             run_id,
         )
     except Exception as exc:
-        run_ref.update({
-            "status": "failed",
-            "error": str(exc),
-            "failed_at": datetime.utcnow().isoformat(),
-        })
+        run.status = "failed"
+        run.error = str(exc)
+        run.failed_at = datetime.utcnow()
+        orm_db.session.commit()
         return jsonify({
             "success": False,
             "error": "Analysis job could not be queued",
@@ -409,9 +434,8 @@ def analyze_business(business_id):
         }), 503
 
     # Store Celery task ID
-    run_ref.update({
-        "task_id": task.id,
-    })
+    run.task_id = task.id
+    orm_db.session.commit()
 
     return jsonify({
         "success": True,
@@ -431,7 +455,6 @@ def get_business_opportunities(business_id):
             "error": "Authentication required"
         }), 401
 
-    business_ref = db.collection("businesses").document(business_id)
     business = get_business_row(business_id)
 
     if business is None:
@@ -446,21 +469,13 @@ def get_business_opportunities(business_id):
             "error": "You do not have permission to view this business"
         }), 403
 
-    opportunities_ref = (
-        business_ref
-        .collection("opportunities")
-        .where("owner_id", "==", user_id)
+    rows = (
+        orm_db.session.query(Opportunity)
+        .filter_by(business_id=business_id, owner_id=user_id)
+        .all()
     )
 
-    opportunities = []
-
-    for doc in opportunities_ref.stream():
-        opportunity = doc.to_dict()
-
-        opportunities.append({
-            "id": doc.id,
-            **opportunity,
-        })
+    opportunities = [opportunity_to_dict(row) for row in rows]
 
     return jsonify({
         "success": True,
@@ -478,7 +493,6 @@ def get_opportunity(business_id, opportunity_id):
             "error": "Authentication required"
         }), 401
 
-    business_ref = db.collection("businesses").document(business_id)
     business = get_business_row(business_id)
 
     if business is None:
@@ -493,23 +507,15 @@ def get_opportunity(business_id, opportunity_id):
             "error": "You do not have permission to view this business"
         }), 403
 
-    opportunity_ref = (
-        business_ref
-        .collection("opportunities")
-        .document(opportunity_id)
-    )
+    opportunity_row = _get_child(Opportunity, opportunity_id, business_id)
 
-    opportunity_doc = opportunity_ref.get()
-
-    if not opportunity_doc.exists:
+    if opportunity_row is None:
         return jsonify({
             "success": False,
             "error": "Opportunity not found"
         }), 404
 
-    opportunity = opportunity_doc.to_dict()
-
-    if opportunity.get("owner_id") != user_id:
+    if str(opportunity_row.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not have permission to view this opportunity"
@@ -517,10 +523,7 @@ def get_opportunity(business_id, opportunity_id):
 
     return jsonify({
         "success": True,
-        "opportunity": {
-            "id": opportunity_doc.id,
-            **opportunity,
-        },
+        "opportunity": opportunity_to_dict(opportunity_row),
     }), 200
     
 @user_bp.route("/api/business/<business_id>/runs/latest", methods=["GET"])
@@ -533,7 +536,6 @@ def get_latest_run(business_id):
             "error": "Authentication required"
         }), 401
 
-    business_ref = db.collection("businesses").document(business_id)
     business = get_business_row(business_id)
 
     if business is None:
@@ -548,29 +550,34 @@ def get_latest_run(business_id):
             "error": "You do not have permission to view this business"
         }), 403
 
-    runs = list(business_ref.collection("agent_runs").stream())
+    latest = (
+        orm_db.session.query(AgentRun)
+        .filter_by(business_id=business_id)
+        .order_by(AgentRun.created_at.desc())
+        .first()
+    )
 
-    if not runs:
+    if latest is None:
         return jsonify({
             "success": True,
             "business_id": business_id,
             "run": None,
         }), 200
 
-    latest = max(runs, key=lambda run: run.to_dict().get("created_at", ""))
-    latest_data = latest.to_dict()
-
     return jsonify({
         "success": True,
         "business_id": business_id,
         "run": {
-            "run_id": latest.id,
-            "status": latest_data.get("status"),
-            "observation_id": latest_data.get("observation_id"),
-            "opportunity_ids": latest_data.get("opportunity_ids"),
-            "error": latest_data.get("error"),
-            "created_at": latest_data.get("created_at"),
-            "completed_at": latest_data.get("completed_at"),
+            "run_id": str(latest.id),
+            "status": latest.status,
+            "observation_id": (
+                None if latest.observation_id is None
+                else str(latest.observation_id)
+            ),
+            "opportunity_ids": latest.opportunity_ids,
+            "error": latest.error,
+            "created_at": _iso(latest.created_at),
+            "completed_at": _iso(latest.completed_at),
         },
     }), 200
 
@@ -583,11 +590,6 @@ def approve_action(business_id, action_id):
             "success": False,
             "error": "Authentication required",
         }), 401
-
-    business_ref = (
-        db.collection("businesses")
-        .document(business_id)
-    )
 
     business = get_business_row(business_id)
 
@@ -603,109 +605,91 @@ def approve_action(business_id, action_id):
             "error": "You do not have permission to modify this business",
         }), 403
 
-    action_ref = (
-        business_ref
-        .collection("actions")
-        .document(action_id)
-    )
+    action_row = _get_child(Action, action_id, business_id)
 
-    action_doc = action_ref.get()
-
-    if not action_doc.exists:
+    if action_row is None:
         return jsonify({
             "success": False,
             "error": "Action not found",
         }), 404
 
-    action = action_doc.to_dict()
-
-    if action.get("owner_id") != user_id:
+    if str(action_row.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not have permission to modify this action",
         }), 403
 
     # ---------------------------------------------------------
-    # Atomic approval
+    # Atomic approval. SELECT ... FOR UPDATE locks the action row for the
+    # duration of the transaction, replacing the @firestore.transactional
+    # retry loop. Re-approve is idempotent: an already-approved action returns
+    # its existing execution_id WITHOUT inserting a second execution.
     # ---------------------------------------------------------
 
-    transaction = db.transaction()
+    try:
+        locked = (
+            orm_db.session.query(Action)
+            .filter_by(id=action_id)
+            .with_for_update()
+            .one_or_none()
+        )
 
-    @firestore.transactional
-    def approve_transaction(transaction):
-        snapshot = action_ref.get(transaction=transaction)
-
-        if not snapshot.exists:
+        if locked is None or str(locked.business_id) != str(business_id):
             raise ValueError("Action not found")
 
-        current_action = snapshot.to_dict()
-
-        if current_action.get("owner_id") != user_id:
+        if str(locked.owner_id) != user_id:
             raise PermissionError(
                 "You do not have permission to modify this action"
             )
 
-        current_status = current_action.get("status")
+        current_status = locked.status
 
         if current_status == "approved":
-            return {
+            result = {
                 "already_approved": True,
-                "execution_id": current_action.get("execution_id"),
+                "execution_id": (
+                    None if locked.execution_id is None
+                    else str(locked.execution_id)
+                ),
+            }
+        elif current_status != "pending_approval":
+            raise ValueError("Only pending actions can be approved")
+        else:
+            now = datetime.utcnow()
+
+            execution = Execution(
+                business_id=business_id,
+                owner_id=user_id,
+                action_id=action_id,
+                status="queued",
+                created_at=now,
+                updated_at=now,
+            )
+            orm_db.session.add(execution)
+            orm_db.session.flush()
+
+            locked.status = "approved"
+            locked.approved_at = now
+            locked.approved_by = user_id
+            locked.execution_id = execution.id
+            locked.updated_at = now
+
+            result = {
+                "already_approved": False,
+                "execution_id": str(execution.id),
             }
 
-        if current_status != "pending_approval":
-            raise ValueError(
-                "Only pending actions can be approved"
-            )
-
-        now = datetime.utcnow().isoformat()
-
-        execution_ref = (
-            business_ref
-            .collection("executions")
-            .document()
-        )
-
-        execution_id = execution_ref.id
-
-        transaction.update(
-            action_ref,
-            {
-                "status": "approved",
-                "approved_at": now,
-                "approved_by": user_id,
-                "execution_id": execution_id,
-                "updated_at": now,
-            },
-        )
-
-        transaction.set(
-            execution_ref,
-            {
-                "business_id": business_id,
-                "owner_id": user_id,
-                "action_id": action_id,
-                "status": "queued",
-                "created_at": now,
-                "updated_at": now,
-            },
-        )
-
-        return {
-            "already_approved": False,
-            "execution_id": execution_id,
-        }
-
-    try:
-        result = approve_transaction(transaction)
+        orm_db.session.commit()
 
     except PermissionError as exc:
+        orm_db.session.rollback()
         return jsonify({
             "success": False,
             "error": str(exc),
         }), 403
 
     except ValueError as exc:
+        orm_db.session.rollback()
         return jsonify({
             "success": False,
             "error": str(exc),
@@ -739,29 +723,18 @@ def approve_action(business_id, action_id):
             execution_id,
         )
 
-        execution_ref = (
-            business_ref
-            .collection("executions")
-            .document(execution_id)
-        )
-
-        execution_ref.update({
-            "task_id": task.id,
-            "updated_at": datetime.utcnow().isoformat(),
-        })
+        execution = orm_db.session.get(Execution, execution_id)
+        execution.task_id = task.id
+        execution.updated_at = datetime.utcnow()
+        orm_db.session.commit()
 
     except Exception as exc:
-        execution_ref = (
-            business_ref
-            .collection("executions")
-            .document(execution_id)
-        )
-
-        execution_ref.update({
-            "status": "failed",
-            "error": f"Failed to queue execution: {str(exc)}",
-            "updated_at": datetime.utcnow().isoformat(),
-        })
+        orm_db.session.rollback()
+        execution = orm_db.session.get(Execution, execution_id)
+        execution.status = "failed"
+        execution.error = f"Failed to queue execution: {str(exc)}"
+        execution.updated_at = datetime.utcnow()
+        orm_db.session.commit()
 
         return jsonify({
             "success": False,
@@ -791,7 +764,6 @@ def reject_action(business_id, action_id):
             "error": "Authentication required"
         }), 401
 
-    business_ref = db.collection("businesses").document(business_id)
     business = get_business_row(business_id)
 
     if business is None:
@@ -806,42 +778,33 @@ def reject_action(business_id, action_id):
             "error": "You do not have permission to modify this business"
         }), 403
 
-    action_ref = (
-        business_ref
-        .collection("actions")
-        .document(action_id)
-    )
+    action_row = _get_child(Action, action_id, business_id)
 
-    action_doc = action_ref.get()
-
-    if not action_doc.exists:
+    if action_row is None:
         return jsonify({
             "success": False,
             "error": "Action not found"
         }), 404
 
-    action = action_doc.to_dict()
-
-    if action.get("owner_id") != user_id:
+    if str(action_row.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not have permission to modify this action"
         }), 403
 
-    if action.get("status") != "pending_approval":
+    if action_row.status != "pending_approval":
         return jsonify({
             "success": False,
             "error": "Only pending actions can be rejected"
         }), 400
 
-    now = datetime.utcnow().isoformat()
+    now = datetime.utcnow()
 
-    action_ref.update({
-        "status": "rejected",
-        "rejected_at": now,
-        "rejected_by": user_id,
-        "updated_at": now,
-    })
+    action_row.status = "rejected"
+    action_row.rejected_at = now
+    action_row.rejected_by = user_id
+    action_row.updated_at = now
+    orm_db.session.commit()
 
     return jsonify({
         "success": True,
@@ -860,7 +823,6 @@ def get_action(business_id, action_id):
             "error": "Authentication required"
         }), 401
 
-    business_ref = db.collection("businesses").document(business_id)
     business = get_business_row(business_id)
 
     if business is None:
@@ -875,23 +837,15 @@ def get_action(business_id, action_id):
             "error": "You do not have permission to view this business"
         }), 403
 
-    action_ref = (
-        business_ref
-        .collection("actions")
-        .document(action_id)
-    )
+    action_row = _get_child(Action, action_id, business_id)
 
-    action_doc = action_ref.get()
-
-    if not action_doc.exists:
+    if action_row is None:
         return jsonify({
             "success": False,
             "error": "Action not found"
         }), 404
 
-    action = action_doc.to_dict()
-
-    if action.get("owner_id") != user_id:
+    if str(action_row.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not have permission to view this action"
@@ -899,10 +853,7 @@ def get_action(business_id, action_id):
 
     return jsonify({
         "success": True,
-        "action": {
-            "id": action_doc.id,
-            **action,
-        },
+        "action": action_to_dict(action_row),
     }), 200
 
 @user_bp.route( "/api/business/<business_id>/actions", methods=["GET"] )
@@ -915,7 +866,6 @@ def get_business_actions(business_id):
             "error": "Authentication required"
         }), 401
 
-    business_ref = db.collection("businesses").document(business_id)
     business = get_business_row(business_id)
 
     if business is None:
@@ -931,27 +881,16 @@ def get_business_actions(business_id):
         }), 403
 
     actions_query = (
-        business_ref
-        .collection("actions")
-        .where("owner_id", "==", user_id)
+        orm_db.session.query(Action)
+        .filter_by(business_id=business_id, owner_id=user_id)
     )
 
     status = request.args.get("status")
 
     if status:
-        actions_query = actions_query.where(
-            "status",
-            "==",
-            status
-        )
+        actions_query = actions_query.filter_by(status=status)
 
-    actions = []
-
-    for doc in actions_query.stream():
-        actions.append({
-            "id": doc.id,
-            **doc.to_dict(),
-        })
+    actions = [action_to_dict(row) for row in actions_query.all()]
 
     return jsonify({
         "success": True,
@@ -972,7 +911,6 @@ def test_action_execution(business_id):
             "error": "Authentication required",
         }), 401
 
-    business_ref = db.collection("businesses").document(business_id)
     business = get_business_row(business_id)
 
     if business is None:
@@ -996,61 +934,48 @@ def test_action_execution(business_id):
             "error": "action_id is required",
         }), 400
 
-    action_ref = (
-        business_ref
-        .collection("actions")
-        .document(action_id)
-    )
+    action_row = _get_child(Action, action_id, business_id)
 
-    action_doc = action_ref.get()
-
-    if not action_doc.exists:
+    if action_row is None:
         return jsonify({
             "success": False,
             "error": "Action not found",
         }), 404
 
-    action = action_doc.to_dict()
-
-    if action.get("owner_id") != user_id:
+    if str(action_row.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not have permission to execute this action",
         }), 403
 
-    if action.get("status") != "approved":
+    if action_row.status != "approved":
         return jsonify({
             "success": False,
             "error": "Only approved actions can be executed",
         }), 400
 
-    execution_ref = (
-        business_ref
-        .collection("executions")
-        .document()
+    now = datetime.utcnow()
+
+    execution = Execution(
+        business_id=business_id,
+        owner_id=user_id,
+        action_id=action_id,
+        status="queued",
+        created_at=now,
+        updated_at=now,
     )
+    orm_db.session.add(execution)
+    orm_db.session.flush()
 
-    execution_id = execution_ref.id
-
-    now = datetime.utcnow().isoformat()
-
-    execution_ref.set({
-        "business_id": business_id,
-        "owner_id": user_id,
-        "action_id": action_id,
-        "status": "queued",
-        "created_at": now,
-        "updated_at": now,
-    })
+    execution_id = str(execution.id)
 
     task = execute_approved_action.delay(
         business_id,
         execution_id,
     )
 
-    execution_ref.update({
-        "task_id": task.id,
-    })
+    execution.task_id = task.id
+    orm_db.session.commit()
 
     return jsonify({
         "success": True,
@@ -1073,7 +998,6 @@ def create_dry_run_action(business_id):
             "error": "Authentication required",
         }), 401
 
-    business_ref = db.collection("businesses").document(business_id)
     business = get_business_row(business_id)
 
     if business is None:
@@ -1088,35 +1012,26 @@ def create_dry_run_action(business_id):
             "error": "You do not have permission to modify this business",
         }), 403
 
-    now = datetime.utcnow().isoformat()
+    now = datetime.utcnow()
 
-    action_ref = (
-        business_ref
-        .collection("actions")
-        .document()
+    action = Action(
+        business_id=business_id,
+        owner_id=user_id,
+        action_type="dry_run",
+        title="Execution pipeline test",
+        description="Safe dry-run test of the action execution pipeline.",
+        requires_approval=True,
+        status="approved",
+        created_at=now,
+        updated_at=now,
     )
-
-    action = {
-        "business_id": business_id,
-        "owner_id": user_id,
-        "action_type": "dry_run",
-        "title": "Execution pipeline test",
-        "description": "Safe dry-run test of the action execution pipeline.",
-        "requires_approval": True,
-        "status": "approved",
-        "created_at": now,
-        "updated_at": now,
-    }
-
-    action_ref.set(action)
+    orm_db.session.add(action)
+    orm_db.session.commit()
 
     return jsonify({
         "success": True,
         "message": "Dry-run action created",
-        "action": {
-            "id": action_ref.id,
-            **action,
-        },
+        "action": action_to_dict(action),
     }), 201
     
 @user_bp.route(
@@ -1132,7 +1047,6 @@ def get_execution_status(business_id, execution_id):
             "error": "Authentication required",
         }), 401
 
-    business_ref = db.collection("businesses").document(business_id)
     business = get_business_row(business_id)
 
     if business is None:
@@ -1147,23 +1061,15 @@ def get_execution_status(business_id, execution_id):
             "error": "You do not have permission to view this business",
         }), 403
 
-    execution_ref = (
-        business_ref
-        .collection("executions")
-        .document(execution_id)
-    )
+    execution_row = _get_child(Execution, execution_id, business_id)
 
-    execution_doc = execution_ref.get()
-
-    if not execution_doc.exists:
+    if execution_row is None:
         return jsonify({
             "success": False,
             "error": "Execution not found",
         }), 404
 
-    execution = execution_doc.to_dict()
-
-    if execution.get("owner_id") != user_id:
+    if str(execution_row.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not have permission to view this execution",
@@ -1171,10 +1077,7 @@ def get_execution_status(business_id, execution_id):
 
     return jsonify({
         "success": True,
-        "execution": {
-            "id": execution_doc.id,
-            **execution,
-        },
+        "execution": execution_to_dict(execution_row),
     }), 200
     
 @user_bp.route(
@@ -1190,7 +1093,6 @@ def create_test_approval_action(business_id):
             "error": "Authentication required",
         }), 401
 
-    business_ref = db.collection("businesses").document(business_id)
     business = get_business_row(business_id)
 
     if business is None:
@@ -1205,39 +1107,30 @@ def create_test_approval_action(business_id):
             "error": "You do not have permission to modify this business",
         }), 403
 
-    now = datetime.utcnow().isoformat()
+    now = datetime.utcnow()
 
-    action_ref = (
-        business_ref
-        .collection("actions")
-        .document()
+    action = Action(
+        business_id=business_id,
+        owner_id=user_id,
+        title="Test approval workflow",
+        action_type="dry_run",
+        objective="Verify the approval-to-execution workflow.",
+        description="Safe development test of action approval and execution.",
+        reasoning="Used to verify the production approval pipeline without external side effects.",
+        expected_outcome="Dry-run execution completes successfully.",
+        required_inputs=[],
+        requires_approval=True,
+        status="pending_approval",
+        created_at=now,
+        updated_at=now,
     )
-
-    action = {
-        "business_id": business_id,
-        "owner_id": user_id,
-        "title": "Test approval workflow",
-        "action_type": "dry_run",
-        "objective": "Verify the approval-to-execution workflow.",
-        "description": "Safe development test of action approval and execution.",
-        "reasoning": "Used to verify the production approval pipeline without external side effects.",
-        "expected_outcome": "Dry-run execution completes successfully.",
-        "required_inputs": [],
-        "requires_approval": True,
-        "status": "pending_approval",
-        "created_at": now,
-        "updated_at": now,
-    }
-
-    action_ref.set(action)
+    orm_db.session.add(action)
+    orm_db.session.commit()
 
     return jsonify({
         "success": True,
         "message": "Test approval action created",
-        "action": {
-            "id": action_ref.id,
-            **action,
-        },
+        "action": action_to_dict(action),
     }), 201
     
 @user_bp.route(
@@ -1252,11 +1145,6 @@ def get_business_measurements(business_id):
             "success": False,
             "error": "Authentication required",
         }), 401
-
-    business_ref = (
-        db.collection("businesses")
-        .document(business_id)
-    )
 
     business = get_business_row(business_id)
 
@@ -1273,37 +1161,25 @@ def get_business_measurements(business_id):
         }), 403
 
     measurements_query = (
-        business_ref
-        .collection("measurements")
+        orm_db.session.query(Measurement)
+        .filter_by(business_id=business_id)
     )
 
     execution_id = request.args.get("execution_id")
 
     if execution_id:
-        measurements_query = measurements_query.where(
-            "execution_id",
-            "==",
-            execution_id,
+        measurements_query = measurements_query.filter_by(
+            execution_id=execution_id,
         )
 
     metric = request.args.get("metric")
 
     if metric:
-        measurements_query = measurements_query.where(
-            "metric",
-            "==",
-            metric,
-        )
+        measurements_query = measurements_query.filter_by(metric=metric)
 
-    measurements = []
-
-    for doc in measurements_query.stream():
-        measurement = doc.to_dict()
-
-        measurements.append({
-            "id": doc.id,
-            **measurement,
-        })
+    measurements = [
+        measurement_to_dict(row) for row in measurements_query.all()
+    ]
 
     return jsonify({
         "success": True,
@@ -1324,11 +1200,6 @@ def get_business_learnings(business_id):
             "error": "Authentication required",
         }), 401
 
-    business_ref = (
-        db.collection("businesses")
-        .document(business_id)
-    )
-
     business = get_business_row(business_id)
 
     if business is None:
@@ -1344,37 +1215,23 @@ def get_business_learnings(business_id):
         }), 403
 
     learnings_query = (
-        business_ref
-        .collection("learnings")
+        orm_db.session.query(Learning)
+        .filter_by(business_id=business_id)
     )
 
     execution_id = request.args.get("execution_id")
 
     if execution_id:
-        learnings_query = learnings_query.where(
-            "execution_id",
-            "==",
-            execution_id,
+        learnings_query = learnings_query.filter_by(
+            execution_id=execution_id,
         )
 
     outcome = request.args.get("outcome")
 
     if outcome:
-        learnings_query = learnings_query.where(
-            "outcome",
-            "==",
-            outcome,
-        )
+        learnings_query = learnings_query.filter_by(outcome=outcome)
 
-    learnings = []
-
-    for doc in learnings_query.stream():
-        learning = doc.to_dict()
-
-        learnings.append({
-            "id": doc.id,
-            **learning,
-        })
+    learnings = [learning_to_dict(row) for row in learnings_query.all()]
 
     return jsonify({
         "success": True,
