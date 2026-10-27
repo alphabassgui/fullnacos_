@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 
 
@@ -113,6 +115,16 @@ def fake_db(monkeypatch):
 
     db = FakeDb()
     monkeypatch.setattr(connection_service, "db", db)
+    # Slice c: the parent business lives in Postgres now and is resolved via
+    # get_business_row; the connections subcollection stays on Firestore (the
+    # FakeDb above). "b1" is not a UUID, so the real lookup would return None —
+    # patch it to an owner-matched row so the connection path is exercised.
+    business = SimpleNamespace(id="b1", owner_id="u1", name="Biz")
+    monkeypatch.setattr(
+        connection_service,
+        "get_business_row",
+        lambda business_id: business if business_id == "b1" else None,
+    )
     return db
 
 

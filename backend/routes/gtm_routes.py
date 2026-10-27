@@ -15,22 +15,25 @@ from pathlib import Path
 
 from flask import Blueprint, jsonify, request, session, current_app, send_file
 from firebase import db
+from models import get_business_row
 
 gtm_bp = Blueprint("gtm_bp", __name__)
 
 
 def _verify_business_ownership(business_id: str, user_id: str):
-    """Verify that business exists and belongs to the authenticated user."""
-    business_ref = db.collection("businesses").document(business_id)
-    doc = business_ref.get()
-    if not doc.exists:
+    """Verify that business exists and belongs to the authenticated user.
+
+    The parent business lives in Postgres now; its GTM children stay on
+    Firestore keyed by the id string. Returns (Business row, None) on success.
+    """
+    business = get_business_row(business_id)
+    if business is None:
         return None, (jsonify({"success": False, "error": "Business not found"}), 404)
 
-    business_data = doc.to_dict() or {}
-    if business_data.get("owner_id") != user_id:
+    if str(business.owner_id) != user_id:
         return None, (jsonify({"success": False, "error": "Unauthorized"}), 403)
 
-    return business_data, None
+    return business, None
 
 
 @gtm_bp.route("/api/gtm/run", methods=["POST"])
@@ -44,7 +47,7 @@ def trigger_gtm_run():
     if not business_id:
         return jsonify({"success": False, "error": "Missing business_id"}), 400
 
-    business_data, error_resp = _verify_business_ownership(business_id, user_id)
+    business, error_resp = _verify_business_ownership(business_id, user_id)
     if error_resp:
         return error_resp
 
@@ -63,7 +66,7 @@ def trigger_gtm_run():
         "user_id": user_id,
         "status": "queued",
         "created_at": now,
-        "website_url": business_data.get("website_url"),
+        "website_url": business.website_url,
     }
     run_ref.set(initial_run_data)
 

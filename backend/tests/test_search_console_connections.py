@@ -109,15 +109,14 @@ def test_callback_redirects_to_connected_on_success(client, monkeypatch):
         },
     )
 
-    # The callback looks up the business via the route module's own `db`.
-    business_doc = MagicMock()
-    business_doc.exists = True
-    business_doc.to_dict.return_value = {"owner_id": "u1"}
-    fake_db = MagicMock()
-    fake_db.collection.return_value.document.return_value.get.return_value = (
-        business_doc
+    # Slice c: the callback resolves the parent business via the Postgres
+    # get_business_row (not Firestore `db`). "b1" is not a UUID, so the real
+    # lookup would return None — patch it to an owner-matched row.
+    monkeypatch.setattr(
+        sc_routes,
+        "get_business_row",
+        lambda business_id: SimpleNamespace(owner_id="u1") if business_id == "b1" else None,
     )
-    monkeypatch.setattr(sc_routes, "db", fake_db)
 
     # The callback now verifies a *signed* state (itsdangerous), not a session
     # value, so build a real signed state carrying the user/business identity.

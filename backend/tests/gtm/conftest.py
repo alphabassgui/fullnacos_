@@ -1,4 +1,6 @@
 import os
+from types import SimpleNamespace
+
 import pytest
 from unittest.mock import MagicMock
 
@@ -45,6 +47,37 @@ def mock_gtm_business_doc():
         "industry": "Software",
     }
     return doc
+
+
+@pytest.fixture
+def gtm_business(monkeypatch):
+    """Slice c: the parent business lives in Postgres now and is resolved via
+    models.get_business_row (imported into routes.gtm_routes and task). Patch that
+    lookup to an owner-matched fake row so the GTM route/task tests exercise their
+    own logic with ownership satisfied; GTM children still come from the patched
+    Firestore `db`. Mutate the returned object (e.g. owner_id) to drive the
+    not-owner path. The "biz-1" id used across these tests is not a UUID, so the
+    real get_business_row would return None before any DB call — patching is the
+    DB-free way to supply a resolvable business."""
+    biz = SimpleNamespace(
+        id="biz-1",
+        owner_id="user-1",
+        website_url="https://example.com",
+        industry="Software",
+        name="Example Corp",
+        description="",
+    )
+
+    def _lookup(business_id):
+        return biz if business_id == biz.id else None
+
+    monkeypatch.setattr("routes.gtm_routes.get_business_row", _lookup)
+    monkeypatch.setattr("task.get_business_row", _lookup)
+    # discover_competitors / get_gtm_seed_queries resolve the business in the
+    # discovery service's own namespace; patch it too for the run that exercises
+    # the real discover_competitors path.
+    monkeypatch.setattr("services.gtm_discovery_service.get_business_row", _lookup)
+    return biz
 
 
 @pytest.fixture

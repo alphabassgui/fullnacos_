@@ -1,6 +1,6 @@
 from flask import Blueprint, jsonify, session
 
-from firebase import db
+from models import Business, business_to_dict, get_business_row
 
 business_api_bp = Blueprint("business_api", __name__)
 
@@ -16,15 +16,13 @@ def list_businesses():
         }), 401
 
     businesses = (
-        db.collection("businesses")
-        .where("owner_id", "==", user_id)
-        .stream()
+        Business.query
+        .filter_by(owner_id=user_id)
+        .order_by(Business.created_at)
+        .all()
     )
 
-    business_list = [
-        {"id": doc.id, **doc.to_dict()}
-        for doc in businesses
-    ]
+    business_list = [business_to_dict(business) for business in businesses]
 
     return jsonify({
         "success": True,
@@ -42,18 +40,15 @@ def get_business(business_id):
             "error": "Authentication required",
         }), 401
 
-    business_ref = db.collection("businesses").document(business_id)
-    business_doc = business_ref.get()
+    business = get_business_row(business_id)
 
-    if not business_doc.exists:
+    if business is None:
         return jsonify({
             "success": False,
             "error": "Business not found",
         }), 404
 
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != user_id:
+    if str(business.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not have permission to view this business",
@@ -61,8 +56,5 @@ def get_business(business_id):
 
     return jsonify({
         "success": True,
-        "business": {
-            "id": business_doc.id,
-            **business,
-        },
+        "business": business_to_dict(business),
     }), 200

@@ -1,4 +1,7 @@
 import pytest
+from werkzeug.security import generate_password_hash
+
+from models import Business, User
 
 
 class _Snapshot:
@@ -113,6 +116,13 @@ VALID_OPPORTUNITY = {
 
 
 @pytest.fixture
+def flask_app():
+    import app as app_module
+    app_module.app.config["TESTING"] = True
+    return app_module.app
+
+
+@pytest.fixture
 def agent_modules(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "test-key")
     monkeypatch.delenv("GROQ_MODEL", raising=False)
@@ -121,15 +131,39 @@ def agent_modules(monkeypatch):
     return analyzer_mod, generator_mod
 
 
+def _seed_business(db_session, website_url="https://acme.example"):
+    """Seed a real Postgres user + business (slice c: the parent business lives in
+    Postgres now). Returns (bid, uid) as strings — the same shape the Celery task
+    receives them as arguments."""
+    user = User(
+        email="owner@example.com",
+        username="U",
+        role="user",
+        status="Active",
+        password_hash=generate_password_hash("password123"),
+    )
+    db_session.add(user)
+    db_session.commit()
+    business = Business(owner_id=user.id, name="Acme", website_url=website_url)
+    db_session.add(business)
+    db_session.commit()
+    return str(business.id), str(user.id)
+
+
 @pytest.fixture
-def task_env(monkeypatch, agent_modules):
+def task_env(monkeypatch, agent_modules, db_session):
     import task as task_mod
 
+    bid, uid = _seed_business(db_session)
+
+    # Children (agent_runs, observations, opportunities, ...) stay on Firestore,
+    # keyed by the business UUID string — with NO parent business doc present, so
+    # these tests also exercise the Category-B property (subcollections survive the
+    # parent leaving Firestore).
     db = FakeTaskDb()
-    biz_ref = db.collection("businesses").document("b1")
-    biz_ref.set({"owner_id": "u1", "name": "Acme", "website_url": "https://acme.example"})
+    biz_ref = db.collection("businesses").document(bid)
     biz_ref.collection("agent_runs").document("r1").set(
-        {"business_id": "b1", "owner_id": "u1", "type": "website_analysis", "status": "queued"}
+        {"business_id": bid, "owner_id": uid, "type": "website_analysis", "status": "queued"}
     )
 
     analyzer_mod, generator_mod = agent_modules
@@ -161,11 +195,11 @@ def task_env(monkeypatch, agent_modules):
     # real create_opportunity persists into the inspectable fake, not Firestore.
     monkeypatch.setattr(opp_service_mod, "db", db)
 
-    return task_mod, db
+    return task_mod, db, bid, uid
 
 
 def test_happy_path_persists_opportunities_and_completes_run(task_env, monkeypatch):
-    task_mod, db = task_env
+    task_mod, db, bid, uid = task_env
     import agent.opportunity_generator as generator_mod
 
     monkeypatch.setattr(generator_mod, "generate_opportunities", lambda analysis: [
@@ -173,9 +207,9 @@ def test_happy_path_persists_opportunities_and_completes_run(task_env, monkeypat
         dict(VALID_OPPORTUNITY, title="Use Instagram", type="social", confidence=0.4),
     ])
 
-    result = task_mod.analyze_business_website.run("b1", "u1", "r1")
+    result = task_mod.analyze_business_website.run(bid, uid, "r1")
 
-    biz_ref = db.collection("businesses").document("b1")
+    biz_ref = db.collection("businesses").document(bid)
     run_ref = biz_ref.collection("agent_runs").document("r1")
 
     assert result["success"] is True
@@ -198,8 +232,8 @@ def test_happy_path_persists_opportunities_and_completes_run(task_env, monkeypat
     assert [ref.id for ref in opp_docs] == result["opportunity_ids"]
     first = opp_docs[0].data
     assert first["title"] == "Add SEO"
-    assert first["business_id"] == "b1"
-    assert first["owner_id"] == "u1"
+    assert first["business_id"] == bid
+    assert first["owner_id"] == uid
     assert first["created_at"]
     for key in ("title", "description", "problem", "evidence",
                 "potential_impact", "confidence", "type"):
@@ -207,7 +241,7 @@ def test_happy_path_persists_opportunities_and_completes_run(task_env, monkeypat
 
 
 def test_observation_groq_failure_marks_run_failed(task_env, monkeypatch):
-    task_mod, db = task_env
+    task_mod, db, bid, uid = task_env
     import agent.analyzer as analyzer_mod
 
     monkeypatch.setattr(
@@ -216,9 +250,9 @@ def test_observation_groq_failure_marks_run_failed(task_env, monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="groq down"):
-        task_mod.analyze_business_website.run("b1", "u1", "r1")
+        task_mod.analyze_business_website.run(bid, uid, "r1")
 
-    biz_ref = db.collection("businesses").document("b1")
+    biz_ref = db.collection("businesses").document(bid)
     run_ref = biz_ref.collection("agent_runs").document("r1")
     assert run_ref.data["status"] == "failed"
     assert run_ref.data["error"] == "groq down"
@@ -232,7 +266,7 @@ def test_fetch_failure_fails_run_gracefully_without_raising(task_env, monkeypatc
     display — NOT crash the Celery task. This is the core regression this fix
     exists to prevent.
     """
-    task_mod, db = task_env
+    task_mod, db, bid, uid = task_env
 
     monkeypatch.setattr(
         task_mod, "fetch_website_html",
@@ -240,12 +274,12 @@ def test_fetch_failure_fails_run_gracefully_without_raising(task_env, monkeypatc
     )
 
     # Must NOT raise — returns a graceful failure envelope instead.
-    result = task_mod.analyze_business_website.run("b1", "u1", "r1")
+    result = task_mod.analyze_business_website.run(bid, uid, "r1")
 
     assert result["success"] is False
     assert "403" in result["error"]
 
-    biz_ref = db.collection("businesses").document("b1")
+    biz_ref = db.collection("businesses").document(bid)
     run_ref = biz_ref.collection("agent_runs").document("r1")
     assert run_ref.data["analysis_status"] == "failed"
     assert run_ref.data["status"] == "failed"
@@ -257,7 +291,7 @@ def test_fetch_failure_fails_run_gracefully_without_raising(task_env, monkeypatc
 
 
 def test_opportunity_groq_failure_marks_run_failed(task_env, monkeypatch):
-    task_mod, db = task_env
+    task_mod, db, bid, uid = task_env
     import agent.opportunity_generator as generator_mod
 
     monkeypatch.setattr(
@@ -266,9 +300,9 @@ def test_opportunity_groq_failure_marks_run_failed(task_env, monkeypatch):
     )
 
     with pytest.raises(ValueError, match="bad JSON"):
-        task_mod.analyze_business_website.run("b1", "u1", "r1")
+        task_mod.analyze_business_website.run(bid, uid, "r1")
 
-    biz_ref = db.collection("businesses").document("b1")
+    biz_ref = db.collection("businesses").document(bid)
     run_ref = biz_ref.collection("agent_runs").document("r1")
     assert run_ref.data["status"] == "failed"
     assert run_ref.data["error"] == "bad JSON"
@@ -277,7 +311,7 @@ def test_opportunity_groq_failure_marks_run_failed(task_env, monkeypatch):
 
 
 def test_invalid_opportunity_data_marks_run_failed(task_env, monkeypatch):
-    task_mod, db = task_env
+    task_mod, db, bid, uid = task_env
     import agent.opportunity_generator as generator_mod
     from agent.opportunity_validation import validate_opportunities
 
@@ -291,9 +325,9 @@ def test_invalid_opportunity_data_marks_run_failed(task_env, monkeypatch):
     )
 
     with pytest.raises(ValueError, match="out of range"):
-        task_mod.analyze_business_website.run("b1", "u1", "r1")
+        task_mod.analyze_business_website.run(bid, uid, "r1")
 
-    biz_ref = db.collection("businesses").document("b1")
+    biz_ref = db.collection("businesses").document(bid)
     run_ref = biz_ref.collection("agent_runs").document("r1")
     assert run_ref.data["status"] == "failed"
     assert len(biz_ref.collection("observations").docs) == 1
@@ -301,7 +335,7 @@ def test_invalid_opportunity_data_marks_run_failed(task_env, monkeypatch):
 
 
 def test_invalid_middle_opportunity_is_skipped_and_run_completes(task_env, monkeypatch):
-    task_mod, db = task_env
+    task_mod, db, bid, uid = task_env
     import agent.opportunity_generator as generator_mod
     import services.opportunity_service as opp_service
     import services.opportunity_action_service as planner_mod
@@ -332,9 +366,9 @@ def test_invalid_middle_opportunity_is_skipped_and_run_completes(task_env, monke
         planner_mod, "generate_actions_for_opportunities", fake_planner
     )
 
-    result = task_mod.analyze_business_website.run("b1", "u1", "r1")
+    result = task_mod.analyze_business_website.run(bid, uid, "r1")
 
-    biz_ref = db.collection("businesses").document("b1")
+    biz_ref = db.collection("businesses").document(bid)
     run_ref = biz_ref.collection("agent_runs").document("r1")
 
     # Run completes; the two valid opportunities persist, the bad one is skipped.
@@ -351,7 +385,7 @@ def test_invalid_middle_opportunity_is_skipped_and_run_completes(task_env, monke
 
 
 def test_all_opportunities_skipped_still_completes_with_empty_ids(task_env, monkeypatch):
-    task_mod, db = task_env
+    task_mod, db, bid, uid = task_env
     import agent.opportunity_generator as generator_mod
     import services.opportunity_service as opp_service
     import services.opportunity_action_service as planner_mod
@@ -381,9 +415,9 @@ def test_all_opportunities_skipped_still_completes_with_empty_ids(task_env, monk
     )
 
     # No exception even though all opportunities were skipped.
-    result = task_mod.analyze_business_website.run("b1", "u1", "r1")
+    result = task_mod.analyze_business_website.run(bid, uid, "r1")
 
-    biz_ref = db.collection("businesses").document("b1")
+    biz_ref = db.collection("businesses").document(bid)
     run_ref = biz_ref.collection("agent_runs").document("r1")
 
     assert result["success"] is True
@@ -396,11 +430,11 @@ def test_all_opportunities_skipped_still_completes_with_empty_ids(task_env, monk
 
 
 def test_empty_opportunities_completes_run_with_no_docs(task_env):
-    task_mod, db = task_env
+    task_mod, db, bid, uid = task_env
 
-    result = task_mod.analyze_business_website.run("b1", "u1", "r1")
+    result = task_mod.analyze_business_website.run(bid, uid, "r1")
 
-    biz_ref = db.collection("businesses").document("b1")
+    biz_ref = db.collection("businesses").document(bid)
     run_ref = biz_ref.collection("agent_runs").document("r1")
     assert result["opportunity_ids"] == []
     assert run_ref.data["status"] == "awaiting_approval"
@@ -411,7 +445,7 @@ def test_empty_opportunities_completes_run_with_no_docs(task_env):
 def test_observation_not_duplicated_on_rerun(task_env, monkeypatch):
     """acks_late redelivery: running analyze_business_website twice with the same
     run_id must leave exactly ONE observation doc (deterministic id overwrites)."""
-    task_mod, db = task_env
+    task_mod, db, bid, uid = task_env
     import agent.opportunity_generator as generator_mod
 
     monkeypatch.setattr(
@@ -419,10 +453,10 @@ def test_observation_not_duplicated_on_rerun(task_env, monkeypatch):
         lambda analysis: [dict(VALID_OPPORTUNITY)],
     )
 
-    first = task_mod.analyze_business_website.run("b1", "u1", "r1")
-    second = task_mod.analyze_business_website.run("b1", "u1", "r1")
+    first = task_mod.analyze_business_website.run(bid, uid, "r1")
+    second = task_mod.analyze_business_website.run(bid, uid, "r1")
 
-    biz_ref = db.collection("businesses").document("b1")
+    biz_ref = db.collection("businesses").document(bid)
     obs_docs = biz_ref.collection("observations").docs
     assert len(obs_docs) == 1
     # Deterministic id == run_id, and the result envelope stays correct.
@@ -434,7 +468,7 @@ def test_observation_not_duplicated_on_rerun(task_env, monkeypatch):
 def test_opportunities_not_duplicated_on_rerun(task_env, monkeypatch):
     """A second delivery of analyze_business_website must not create duplicate
     opportunities — the create_opportunity type+problem dedupe guard holds."""
-    task_mod, db = task_env
+    task_mod, db, bid, uid = task_env
     import agent.opportunity_generator as generator_mod
 
     monkeypatch.setattr(
@@ -445,10 +479,10 @@ def test_opportunities_not_duplicated_on_rerun(task_env, monkeypatch):
         ],
     )
 
-    task_mod.analyze_business_website.run("b1", "u1", "r1")
-    task_mod.analyze_business_website.run("b1", "u1", "r1")
+    task_mod.analyze_business_website.run(bid, uid, "r1")
+    task_mod.analyze_business_website.run(bid, uid, "r1")
 
-    biz_ref = db.collection("businesses").document("b1")
+    biz_ref = db.collection("businesses").document(bid)
     opp_docs = biz_ref.collection("opportunities").docs
     assert len(opp_docs) == 2  # not 4
 
@@ -456,7 +490,7 @@ def test_opportunities_not_duplicated_on_rerun(task_env, monkeypatch):
 def test_run_agent_cycle_skips_second_dispatch(task_env, monkeypatch):
     """acks_late redelivery of run_agent_cycle must NOT enqueue a second analysis
     child once the run already carries an analysis_task_id."""
-    task_mod, db = task_env
+    task_mod, db, bid, uid = task_env
 
     calls = []
 
@@ -470,18 +504,69 @@ def test_run_agent_cycle_skips_second_dispatch(task_env, monkeypatch):
 
     monkeypatch.setattr(task_mod.analyze_business_website, "delay", fake_delay)
 
-    biz_ref = db.collection("businesses").document("b1")
+    biz_ref = db.collection("businesses").document(bid)
     run_ref = biz_ref.collection("agent_runs").document("r1")
 
-    first = task_mod.run_agent_cycle.run("b1", "u1", "r1")
+    first = task_mod.run_agent_cycle.run(bid, uid, "r1")
     assert first["success"] is True
     assert first["analysis_task_id"] == "analysis-task-123"
     assert first.get("already_dispatched") is not True
     assert len(calls) == 1
     assert run_ref.data["analysis_task_id"] == "analysis-task-123"
 
-    second = task_mod.run_agent_cycle.run("b1", "u1", "r1")
+    second = task_mod.run_agent_cycle.run(bid, uid, "r1")
     assert second["already_dispatched"] is True
     assert second["analysis_task_id"] == "analysis-task-123"
     # No second child enqueued.
     assert len(calls) == 1
+
+
+def test_analyze_finds_postgres_only_business_not_falsely_missing(task_env, monkeypatch):
+    """Slice-c regression: the business exists ONLY in Postgres (no Firestore
+    parent doc). analyze_business_website must resolve the parent via the Postgres
+    `get_business_row` lookup and run to completion — it must NOT short-circuit
+    with "Business not found" the way the old Firestore `.get().exists` check
+    would once the parent left Firestore."""
+    task_mod, db, bid, uid = task_env
+    import agent.opportunity_generator as generator_mod
+
+    monkeypatch.setattr(
+        generator_mod, "generate_opportunities",
+        lambda analysis: [dict(VALID_OPPORTUNITY)],
+    )
+
+    # No Firestore parent business doc is seeded by task_env — the only record of
+    # the business is the Postgres row. (The business id resolves a Firestore ref,
+    # but that doc does not "exist" in Firestore.)
+    assert db.collection("businesses").document(bid).get().exists is False
+
+    result = task_mod.analyze_business_website.run(bid, uid, "r1")
+
+    assert result["success"] is True
+    assert result.get("error") != "Business not found"
+    run_ref = db.collection("businesses").document(bid).collection("agent_runs").document("r1")
+    assert run_ref.data["status"] == "awaiting_approval"
+    assert not any(u.get("error") == "Business not found" for u in run_ref.updates)
+
+
+def test_context_task_wraps_body_in_app_context():
+    """The ContextTask base (added for slice c) must push a Flask app context
+    around every task body so the Postgres `db.session` lookups work in the
+    worker, which never pushes one itself. Calling the task object (not `.run`)
+    goes through `ContextTask.__call__`; the body observes an active app context."""
+    import flask
+
+    import task as task_mod
+
+    seen = {}
+
+    @task_mod.celery.task(name="tests.probe_app_context")
+    def _probe():
+        seen["in_context"] = flask.has_app_context()
+        return "ok"
+
+    # Invoking the task object routes through Task.__call__ -> ContextTask.__call__.
+    result = _probe()
+
+    assert result == "ok"
+    assert seen["in_context"] is True

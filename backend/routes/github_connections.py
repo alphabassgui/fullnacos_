@@ -5,6 +5,7 @@ from flask import Blueprint, jsonify, redirect, request, session
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from services.connection_service import create_github_connection
 from connectors.github_api import GitHubAPI
+from models import get_business_row
 
 # Where to send the browser back to after the OAuth callback.
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
@@ -45,14 +46,12 @@ def github_callback():
         github = GitHubAPI(access_token=token_data["access_token"])
         account = github.get_authenticated_user()
 
-        business_ref = db.collection("businesses").document(business_id)
-        business_doc = business_ref.get()
+        business = get_business_row(business_id)
 
-        if not business_doc.exists:
+        if business is None:
             return redirect(f"{FRONTEND_URL}/connections?github=error")
 
-        business = business_doc.to_dict()
-        if business.get("owner_id") != user_id:
+        if str(business.owner_id) != user_id:
             return redirect(f"{FRONTEND_URL}/connections?github=error")
 
         create_github_connection(

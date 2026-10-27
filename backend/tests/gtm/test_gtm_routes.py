@@ -28,22 +28,17 @@ def test_gtm_run_business_not_found_returns_404(auth_client):
     assert res.status_code == 404
 
 
-def test_gtm_run_unauthorized_returns_403(auth_client):
-    mock_doc = MagicMock()
-    mock_doc.exists = True
-    mock_doc.to_dict.return_value = {"owner_id": "different-user"}
+def test_gtm_run_unauthorized_returns_403(auth_client, gtm_business):
+    gtm_business.owner_id = "different-user"
 
-    with patch("firebase.db.collection") as mock_db:
-        mock_db.return_value.document.return_value.get.return_value = mock_doc
-        res = auth_client.post("/api/gtm/run", json={"business_id": "biz-1"})
+    res = auth_client.post("/api/gtm/run", json={"business_id": "biz-1"})
 
     assert res.status_code == 403
 
 
-def test_gtm_run_authorized_dispatches_task(auth_client, mock_gtm_business_doc):
+def test_gtm_run_authorized_dispatches_task(auth_client, gtm_business):
     with patch("firebase.db.collection") as mock_db, \
          patch("task.run_gtm_analysis.delay") as mock_delay:
-        mock_db.return_value.document.return_value.get.return_value = mock_gtm_business_doc
         mock_delay.return_value.id = "celery-task-123"
 
         res = auth_client.post("/api/gtm/run", json={"business_id": "biz-1"})
@@ -54,7 +49,7 @@ def test_gtm_run_authorized_dispatches_task(auth_client, mock_gtm_business_doc):
     mock_delay.assert_called_once()
 
 
-def test_gtm_runs_list_route(auth_client, mock_gtm_business_doc):
+def test_gtm_runs_list_route(auth_client, gtm_business):
     mock_run_doc = MagicMock()
     mock_run_doc.id = "run-1"
     mock_run_doc.to_dict.return_value = {
@@ -63,7 +58,6 @@ def test_gtm_runs_list_route(auth_client, mock_gtm_business_doc):
     }
 
     with patch("firebase.db.collection") as mock_db:
-        mock_db.return_value.document.return_value.get.return_value = mock_gtm_business_doc
         mock_db.return_value.document.return_value.collection.return_value.order_by.return_value.stream.return_value = [mock_run_doc]
 
         res = auth_client.get("/api/gtm/runs?business_id=biz-1")
@@ -74,7 +68,7 @@ def test_gtm_runs_list_route(auth_client, mock_gtm_business_doc):
     assert res.json["runs"][0]["id"] == "run-1"
 
 
-def test_gtm_run_detail_route(auth_client, mock_gtm_business_doc):
+def test_gtm_run_detail_route(auth_client, gtm_business):
     mock_run_doc = MagicMock()
     mock_run_doc.exists = True
     mock_run_doc.id = "run-1"
@@ -84,7 +78,6 @@ def test_gtm_run_detail_route(auth_client, mock_gtm_business_doc):
     }
 
     with patch("firebase.db.collection") as mock_db:
-        mock_db.return_value.document.return_value.get.return_value = mock_gtm_business_doc
         mock_db.return_value.document.return_value.collection.return_value.document.return_value.get.return_value = mock_run_doc
 
         res = auth_client.get("/api/gtm/runs/run-1?business_id=biz-1")
@@ -93,7 +86,7 @@ def test_gtm_run_detail_route(auth_client, mock_gtm_business_doc):
     assert res.json["run"]["id"] == "run-1"
 
 
-def test_gtm_run_dossier_route(auth_client, mock_gtm_business_doc, tmp_path):
+def test_gtm_run_dossier_route(auth_client, gtm_business, tmp_path):
     dossier_file = tmp_path / "run-1.md"
     dossier_file.write_text("# Executive Dossier Content", encoding="utf-8")
 
@@ -106,7 +99,6 @@ def test_gtm_run_dossier_route(auth_client, mock_gtm_business_doc, tmp_path):
     }
 
     with patch("firebase.db.collection") as mock_db:
-        mock_db.return_value.document.return_value.get.return_value = mock_gtm_business_doc
         mock_db.return_value.document.return_value.collection.return_value.document.return_value.get.return_value = mock_run_doc
 
         res = auth_client.get("/api/gtm/runs/run-1/dossier?business_id=biz-1")
@@ -136,7 +128,7 @@ def test_gtm_run_detail_requires_params_and_missing_run_returns_404(client, auth
     assert res.status_code == 404
 
 
-def test_gtm_run_dossier_generates_inline_if_file_missing(auth_client, mock_gtm_business_doc):
+def test_gtm_run_dossier_generates_inline_if_file_missing(auth_client, gtm_business):
     mock_run_doc = MagicMock()
     mock_run_doc.exists = True
     mock_run_doc.id = "run-no-file"
@@ -148,7 +140,6 @@ def test_gtm_run_dossier_generates_inline_if_file_missing(auth_client, mock_gtm_
     }
 
     with patch("firebase.db.collection") as mock_db:
-        mock_db.return_value.document.return_value.get.return_value = mock_gtm_business_doc
         mock_db.return_value.document.return_value.collection.return_value.document.return_value.get.return_value = mock_run_doc
 
         res = auth_client.get("/api/gtm/runs/run-no-file/dossier?business_id=biz-1")
@@ -157,18 +148,16 @@ def test_gtm_run_dossier_generates_inline_if_file_missing(auth_client, mock_gtm_
     assert "Overall Score: 75" in res.data.decode("utf-8")
 
 
-def test_gtm_run_celery_dispatch_exception_handled(auth_client, mock_gtm_business_doc):
-    with patch("firebase.db.collection") as mock_db, \
+def test_gtm_run_celery_dispatch_exception_handled(auth_client, gtm_business):
+    with patch("firebase.db.collection"), \
          patch("task.run_gtm_analysis.delay", side_effect=Exception("Redis down")):
-        mock_db.return_value.document.return_value.get.return_value = mock_gtm_business_doc
-
         res = auth_client.post("/api/gtm/run", json={"business_id": "biz-1"})
 
     assert res.status_code == 202
     assert res.json["success"] is True
 
 
-def test_run_gtm_analysis_task_execution(mock_gtm_business_doc, tmp_path):
+def test_run_gtm_analysis_task_execution(gtm_business, tmp_path):
     from task import run_gtm_analysis
 
     mock_run_ref = MagicMock()
@@ -208,9 +197,9 @@ def test_run_gtm_analysis_task_execution(mock_gtm_business_doc, tmp_path):
          patch("services.gtm_dossier_service.save_dossier_to_file", return_value="static/dossiers/run-1.md"), \
          patch("services.opportunity_service.create_opportunity", return_value={"id": "opp-1"}):
 
-        # Configure mock_db to return business doc on collection("businesses").document(id)
-        # and run_ref on collection("businesses").document(id).collection("gtm_runs").document(run_id)
-        mock_db.return_value.document.return_value.get.return_value = mock_gtm_business_doc
+        # The parent business is resolved via the patched Postgres get_business_row
+        # (gtm_business). Firestore still backs the gtm_runs child: run_ref on
+        # collection("businesses").document(id).collection("gtm_runs").document(run_id).
         mock_db.return_value.document.return_value.collection.return_value.document.return_value = mock_run_ref
 
         res = run_gtm_analysis(business_id="biz-1", user_id="user-1", run_id="run-1")
@@ -230,8 +219,10 @@ def _persisted_competitors(mock_run_ref):
     raise AssertionError("run_ref.update was never called with competitors_analyzed")
 
 
-def _run_gtm_with(discover_return, analysis, tmp_path, business_doc):
-    """Execute run_gtm_analysis with the standard GTM mocks and return the run_ref."""
+def _run_gtm_with(discover_return, analysis, tmp_path):
+    """Execute run_gtm_analysis with the standard GTM mocks and return the run_ref.
+    The parent business is resolved via the patched get_business_row (gtm_business
+    fixture, active for the calling test)."""
     from task import run_gtm_analysis
 
     mock_run_ref = MagicMock()
@@ -253,7 +244,6 @@ def _run_gtm_with(discover_return, analysis, tmp_path, business_doc):
          patch("services.gtm_dossier_service.save_dossier_to_file", return_value="static/dossiers/run-1.md"), \
          patch("services.opportunity_service.create_opportunity", return_value={"id": "opp-1"}):
 
-        mock_db.return_value.document.return_value.get.return_value = business_doc
         mock_db.return_value.document.return_value.collection.return_value.document.return_value = mock_run_ref
 
         res = run_gtm_analysis(business_id="biz-1", user_id="user-1", run_id="run-1")
@@ -261,7 +251,7 @@ def _run_gtm_with(discover_return, analysis, tmp_path, business_doc):
     return res, mock_run_ref
 
 
-def test_run_gtm_analysis_merges_competitor_insights_by_domain(mock_gtm_business_doc, tmp_path):
+def test_run_gtm_analysis_merges_competitor_insights_by_domain(gtm_business, tmp_path):
     # Competitor domain is given in a scheme/www. variant to exercise normalization.
     discover_return = [{"url": "https://www.Rival.com/home", "domain": "https://www.Rival.com/home"}]
     analysis = {
@@ -277,7 +267,7 @@ def test_run_gtm_analysis_merges_competitor_insights_by_domain(mock_gtm_business
         ],
     }
 
-    res, mock_run_ref = _run_gtm_with(discover_return, analysis, tmp_path, mock_gtm_business_doc)
+    res, mock_run_ref = _run_gtm_with(discover_return, analysis, tmp_path)
 
     assert res["success"] is True
     competitors = _persisted_competitors(mock_run_ref)
@@ -286,7 +276,7 @@ def test_run_gtm_analysis_merges_competitor_insights_by_domain(mock_gtm_business
     assert competitors[0]["weaknesses"] == ["No self-serve signup"]
 
 
-def test_run_gtm_analysis_no_matching_insights_yields_empty_lists(mock_gtm_business_doc, tmp_path):
+def test_run_gtm_analysis_no_matching_insights_yields_empty_lists(gtm_business, tmp_path):
     # Non-matching domain AND unequal lengths -> no match, no index fallback, no error.
     discover_return = [{"url": "https://rival.com", "domain": "rival.com"}]
     analysis = {
@@ -299,7 +289,7 @@ def test_run_gtm_analysis_no_matching_insights_yields_empty_lists(mock_gtm_busin
         ],
     }
 
-    res, mock_run_ref = _run_gtm_with(discover_return, analysis, tmp_path, mock_gtm_business_doc)
+    res, mock_run_ref = _run_gtm_with(discover_return, analysis, tmp_path)
 
     assert res["success"] is True
     competitors = _persisted_competitors(mock_run_ref)
@@ -308,7 +298,7 @@ def test_run_gtm_analysis_no_matching_insights_yields_empty_lists(mock_gtm_busin
     assert competitors[0]["weaknesses"] == []
 
 
-def test_run_gtm_analysis_missing_competitor_insights_key_is_safe(mock_gtm_business_doc, tmp_path):
+def test_run_gtm_analysis_missing_competitor_insights_key_is_safe(gtm_business, tmp_path):
     # Engine result omits competitor_insights entirely — run must still complete.
     discover_return = [{"url": "https://rival.com", "domain": "rival.com"}]
     analysis = {
@@ -317,7 +307,7 @@ def test_run_gtm_analysis_missing_competitor_insights_key_is_safe(mock_gtm_busin
         "opportunities": [],
     }
 
-    res, mock_run_ref = _run_gtm_with(discover_return, analysis, tmp_path, mock_gtm_business_doc)
+    res, mock_run_ref = _run_gtm_with(discover_return, analysis, tmp_path)
 
     assert res["success"] is True
     competitors = _persisted_competitors(mock_run_ref)
@@ -325,7 +315,7 @@ def test_run_gtm_analysis_missing_competitor_insights_key_is_safe(mock_gtm_busin
     assert competitors[0]["weaknesses"] == []
 
 
-def test_run_gtm_analysis_computes_seed_queries_once(mock_gtm_business_doc, tmp_path):
+def test_run_gtm_analysis_computes_seed_queries_once(gtm_business, tmp_path):
     # Seed queries feed both competitor discovery AND the vision prompt. They must
     # be computed exactly once per run and threaded through — not recomputed. Here
     # discover_competitors runs for real (only its network search is stubbed) so
@@ -353,7 +343,6 @@ def test_run_gtm_analysis_computes_seed_queries_once(mock_gtm_business_doc, tmp_
          patch("services.gtm_dossier_service.save_dossier_to_file", return_value="static/dossiers/run-1.md"), \
          patch("services.opportunity_service.create_opportunity", return_value={"id": "opp-1"}):
 
-        mock_db.return_value.document.return_value.get.return_value = mock_gtm_business_doc
         mock_db.return_value.document.return_value.collection.return_value.document.return_value = mock_run_ref
 
         res = run_gtm_analysis(business_id="biz-1", user_id="user-1", run_id="run-1")

@@ -5,6 +5,7 @@ from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from services.connection_service import create_connection
 
 from firebase import db
+from models import get_business_row
 from connectors.google_search_console import GoogleSearchConsoleAPI
 
 # Where to send the browser back to after the OAuth callback.
@@ -46,21 +47,15 @@ def search_console_connect():
             "error": "Missing business_id",
         }), 400
 
-    business_ref = (
-        db.collection("businesses")
-        .document(business_id)
-    )
-    business_doc = business_ref.get()
+    business = get_business_row(business_id)
 
-    if not business_doc.exists:
+    if business is None:
         return jsonify({
             "success": False,
             "error": "Business not found",
         }), 404
 
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != user_id:
+    if str(business.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not own this business",
@@ -110,18 +105,12 @@ def search_console_callback():
     if not user_id or not business_id:
         return redirect(f"{FRONTEND_URL}/connections?search_console=error")
 
-    business_ref = (
-        db.collection("businesses")
-        .document(business_id)
-    )
-    business_doc = business_ref.get()
+    business = get_business_row(business_id)
 
-    if not business_doc.exists:
+    if business is None:
         return redirect(f"{FRONTEND_URL}/connections?search_console=error")
 
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != user_id:
+    if str(business.owner_id) != user_id:
         return redirect(f"{FRONTEND_URL}/connections?search_console=error")
 
     try:

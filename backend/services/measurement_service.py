@@ -3,6 +3,8 @@ from agent.learning_generator import generate_learning_from_measurement
 from services.learning_service import create_learning
 from firebase import db
 
+from models import get_business_row
+
 
 def record_measurement(
     business_id,
@@ -41,12 +43,12 @@ def record_measurement(
     if not source:
         raise ValueError("source is required")
 
-    business_ref = db.collection("businesses").document(business_id)
-
-    business_doc = business_ref.get()
-
-    if not business_doc.exists:
+    # Parent business lives in Postgres now (existence-only check here); the
+    # executions/measurements subcollections stay on Firestore keyed by the id.
+    if get_business_row(business_id) is None:
         raise ValueError("Business not found")
+
+    business_ref = db.collection("businesses").document(business_id)
 
     execution_ref = (
         business_ref

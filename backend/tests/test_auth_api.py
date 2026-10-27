@@ -4,7 +4,7 @@ import uuid
 import pytest
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from models import SecurityLog, User, UserSession
+from models import Business, SecurityLog, User, UserSession
 
 # A syntactically valid UUID that is never seeded — used for the "unknown user"
 # paths, where a non-UUID string would fail to bind and surface as a 500.
@@ -173,6 +173,18 @@ def seed_user(db_session, email="alice@example.com", password="password123",
 def seed_session(db_session, user_id, token, device_id=None):
     db_session.add(UserSession(token=token, user_id=user_id, device_id=device_id))
     db_session.commit()
+
+
+def seed_business(db_session, owner_id, name="Ada's Bakery", **overrides):
+    """Insert a Postgres business row (slice c). Returns the Business; the
+    str()'d id is the Firestore subcollection key for the children that stay on
+    Firestore."""
+    fields = dict(owner_id=owner_id, name=name)
+    fields.update(overrides)
+    business = Business(**fields)
+    db_session.add(business)
+    db_session.commit()
+    return business
 
 
 def post_json(client, path, body, ip):
@@ -459,8 +471,10 @@ def test_me_derives_onboarding_from_completed_run(db_session, fs, client):
     # run → /me derives has_completed_onboarding True (hybrid evidence path).
     user = seed_user(db_session)
     uid = str(user.id)
-    business_ref = fs.collection("businesses").document("b1")
-    business_ref.set({"owner_id": uid, "name": "Ada's Bakery"})
+    # Business lives in Postgres now; its agent_runs child stays on Firestore,
+    # keyed by the business UUID string.
+    business = seed_business(db_session, owner_id=uid)
+    business_ref = fs.collection("businesses").document(str(business.id))
     business_ref.collection("agent_runs").document("r1").set({
         "owner_id": uid, "analysis_status": "completed",
     })
@@ -475,8 +489,8 @@ def test_me_derives_onboarding_from_completed_run(db_session, fs, client):
 def test_me_onboarding_false_without_completed_run(db_session, fs, client):
     user = seed_user(db_session)
     uid = str(user.id)
-    business_ref = fs.collection("businesses").document("b1")
-    business_ref.set({"owner_id": uid, "name": "Ada's Bakery"})
+    business = seed_business(db_session, owner_id=uid)
+    business_ref = fs.collection("businesses").document(str(business.id))
     business_ref.collection("agent_runs").document("r1").set({
         "owner_id": uid, "analysis_status": "running",
     })
@@ -726,23 +740,27 @@ def account_db(monkeypatch):
 
 
 def _seed_account(db_session, fs_db, email="alice@example.com"):
-    """Seed the full footprint of one account: the Postgres user plus a
-    security_logs row (cascade targets), and the Firestore business (with
-    subcollections) + student_profile that stay on Firestore this slice."""
+    """Seed the full footprint of one account: the Postgres user + business row
+    (the delete enumerates business ids from Postgres now) plus a security_logs
+    row (cascade targets), and the Firestore subcollections + student_profile
+    that stay on Firestore this slice — keyed by the business UUID string.
+
+    Returns (uid, bid) where bid == str(business.id)."""
     user = seed_user(db_session, email=email)
     uid = str(user.id)
     db_session.add(SecurityLog(type="device_mismatch", user_id=uid))
+    business = seed_business(db_session, owner_id=uid)
+    bid = str(business.id)
     db_session.commit()
 
-    biz = ("businesses", f"{uid}-b1")
-    fs_db._store[biz] = {"owner_id": uid, "name": "Ada's Bakery"}
+    biz = ("businesses", bid)
     fs_db._store[biz + ("opportunities", "opp1")] = {"owner_id": uid}
     fs_db._store[biz + ("opportunities", "opp2")] = {"owner_id": uid}
     fs_db._store[biz + ("actions", "act1")] = {"owner_id": uid}
     fs_db._store[biz + ("connections", "con1")] = {"owner_id": uid, "provider": "github"}
     fs_db._store[biz + ("gtm_runs", "gtm1")] = {"owner_id": uid}
     fs_db._store[("student_profiles", uid)] = {"bio": "hi"}
-    return uid
+    return uid, bid
 
 
 def _login(client, user_id):
@@ -762,7 +780,7 @@ def test_delete_account_hard_deletes_everything(account_db, db_session, client):
     # Required case: deletion removes the Postgres user + its cascade AND still
     # triggers the Firestore recursive_delete business cascade.
     fs_db, auth_api = account_db
-    uid = _seed_account(db_session, fs_db, "alice@example.com")
+    uid, bid = _seed_account(db_session, fs_db, "alice@example.com")
     _login(client, uid)
 
     # Confirmation is re-verified case-insensitively (stored email is lowercased).
@@ -771,7 +789,7 @@ def test_delete_account_hard_deletes_everything(account_db, db_session, client):
     assert resp.get_json() == {"success": True, "message": "Account deleted"}
 
     # Firestore: business + every subcollection doc + student_profile gone.
-    assert [p for p in fs_db._store if p[:2] == ("businesses", f"{uid}-b1")] == []
+    assert [p for p in fs_db._store if p[:2] == ("businesses", bid)] == []
     assert ("student_profiles", uid) not in fs_db._store
     # Postgres: user + its security_logs (and any sessions) gone via FK cascade.
     assert _user_rows(db_session, uid) == 0
@@ -782,16 +800,15 @@ def test_delete_account_hard_deletes_everything(account_db, db_session, client):
 
 def test_delete_account_isolates_other_users(account_db, db_session, client):
     fs_db, auth_api = account_db
-    uid1 = _seed_account(db_session, fs_db, "alice@example.com")
-    uid2 = _seed_account(db_session, fs_db, "bob@example.com")
+    uid1, bid1 = _seed_account(db_session, fs_db, "alice@example.com")
+    uid2, bid2 = _seed_account(db_session, fs_db, "bob@example.com")
     _login(client, uid1)
 
     resp = client.delete("/api/auth/account", json={"confirm_email": "alice@example.com"})
     assert resp.status_code == 200
 
     # Everything belonging to u2 is untouched (both stores).
-    assert ("businesses", f"{uid2}-b1") in fs_db._store
-    assert ("businesses", f"{uid2}-b1", "opportunities", "opp1") in fs_db._store
+    assert ("businesses", bid2, "opportunities", "opp1") in fs_db._store
     assert ("student_profiles", uid2) in fs_db._store
     assert _user_rows(db_session, uid2) == 1
     assert _security_log_rows(db_session, uid2) == 1
@@ -799,7 +816,7 @@ def test_delete_account_isolates_other_users(account_db, db_session, client):
 
 def test_delete_account_revokes_and_cleans_tiles_when_connected(account_db, db_session, client):
     fs_db, auth_api = account_db
-    uid = _seed_account(db_session, fs_db, "alice@example.com")
+    uid, bid = _seed_account(db_session, fs_db, "alice@example.com")
     _login(client, uid)
 
     gh_calls, goog_calls, tile_calls = [], [], []
@@ -813,7 +830,7 @@ def test_delete_account_revokes_and_cleans_tiles_when_connected(account_db, db_s
     assert resp.status_code == 200
     assert gh_calls == ["gh-access"]
     assert goog_calls == ["goog-refresh"]  # refresh token preferred
-    assert tile_calls == [f"{uid}-b1"]
+    assert tile_calls == [bid]
     assert _user_rows(db_session, uid) == 0
 
 
@@ -821,7 +838,7 @@ def test_delete_account_best_effort_failures_still_delete(account_db, db_session
     # Even if the revoke helpers AND the tile helper RAISE, the hard delete must
     # still complete and return 200.
     fs_db, auth_api = account_db
-    uid = _seed_account(db_session, fs_db, "alice@example.com")
+    uid, bid = _seed_account(db_session, fs_db, "alice@example.com")
     _login(client, uid)
 
     def boom(*a, **k):
@@ -838,13 +855,13 @@ def test_delete_account_best_effort_failures_still_delete(account_db, db_session
     assert resp.status_code == 200
     assert resp.get_json()["success"] is True
     assert _user_rows(db_session, uid) == 0
-    assert [p for p in fs_db._store if p[:2] == ("businesses", f"{uid}-b1")] == []
+    assert [p for p in fs_db._store if p[:2] == ("businesses", bid)] == []
     assert _security_log_rows(db_session, uid) == 0
 
 
 def test_delete_account_wrong_email_400_nothing_deleted(account_db, db_session, client):
     fs_db, auth_api = account_db
-    uid = _seed_account(db_session, fs_db, "alice@example.com")
+    uid, bid = _seed_account(db_session, fs_db, "alice@example.com")
     fs_before = dict(fs_db._store)
     _login(client, uid)
 
@@ -858,7 +875,7 @@ def test_delete_account_wrong_email_400_nothing_deleted(account_db, db_session, 
 
 def test_delete_account_missing_email_400_nothing_deleted(account_db, db_session, client):
     fs_db, auth_api = account_db
-    uid = _seed_account(db_session, fs_db, "alice@example.com")
+    uid, bid = _seed_account(db_session, fs_db, "alice@example.com")
     fs_before = dict(fs_db._store)
     _login(client, uid)
 
