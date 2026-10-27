@@ -58,7 +58,7 @@ export function FaqSplit() {
             <Logomark size={32} />
             <h3 className="gv-faq-card-t">Still have questions?</h3>
             <p className="gv-faq-card-p">Talk to us, no slides, no sales pitch.</p>
-            <Link href="/signup" style={{ textDecoration: "none", alignSelf: "flex-start" }}>
+            <Link href="mailto:joshua.nicholas@student.aul.edu.ng" style={{ textDecoration: "none", alignSelf: "flex-start" }}>
               <Button hierarchy="primary" size="lg">
                 Talk to us
               </Button>
