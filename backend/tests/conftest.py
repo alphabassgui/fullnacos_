@@ -10,6 +10,13 @@ from sqlalchemy.engine import make_url
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# The ORM routes (users/sessions/security_logs) need Flask-SQLAlchemy wired up,
+# but `app.py` only calls `db.init_app` when DATABASE_URL is set — and the CI
+# test step sets only TEST_DATABASE_URL. Mirror it into DATABASE_URL *before*
+# `app` is imported so the extension binds to the same disposable test database.
+if os.getenv("TEST_DATABASE_URL") and not os.getenv("DATABASE_URL"):
+    os.environ["DATABASE_URL"] = os.environ["TEST_DATABASE_URL"]
+
 
 # --- Postgres test harness (infra only) -------------------------------------
 # These fixtures back the Postgres-foundation smoke test. They bind to a
@@ -65,3 +72,38 @@ def db_conn(engine):
             nested.rollback()
         outer.rollback()
         connection.close()
+
+
+@pytest.fixture()
+def db_session(flask_app):
+    """Flask-SQLAlchemy's ``db.session`` against the disposable test database,
+    with the three auth tables wiped after each test so nothing leaks between
+    tests.
+
+    A connection/SAVEPOINT rollback would be cleaner, but Flask-SQLAlchemy's
+    ``Session.get_bind()`` routes mapped-class queries straight to the engine
+    (ignoring a session bound to an external connection), and the auth routes
+    run in their own request-scoped sessions that commit to the real database.
+    So isolation is enforced by truncating the tables in teardown instead.
+    Skips when TEST_DATABASE_URL is unset, leaving the DB-independent tests to
+    run locally.
+    """
+    if not os.getenv("TEST_DATABASE_URL"):
+        pytest.skip("TEST_DATABASE_URL not set; skipping Postgres-backed tests")
+
+    import sqlalchemy as sa
+
+    from extensions import db
+
+    with flask_app.app_context():
+        try:
+            yield db.session
+        finally:
+            db.session.rollback()
+            db.session.execute(
+                sa.text(
+                    "TRUNCATE users, user_sessions, security_logs CASCADE"
+                )
+            )
+            db.session.commit()
+            db.session.remove()

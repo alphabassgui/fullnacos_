@@ -2,12 +2,14 @@ import hmac
 import logging
 import secrets
 from flask import Blueprint, render_template, request, redirect, url_for, flash, session, current_app
-from firebase_admin import auth as admin_auth
 from firebase import db
-from google.cloud.firestore_v1.base_query import FieldFilter
 from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
-from functools import wraps
+
+from sqlalchemy.exc import IntegrityError
+
+from extensions import db as orm_db
+from models import User, UserSession, SecurityLog
 
 from redis_helpers import (
     redis_check_registration_limit,
@@ -129,61 +131,43 @@ def log_registration(ip: str) -> None:
 
 
 def log_suspicious_device(device_id: str, user_id: str, ip: str) -> None:
-    """Persists suspicious access attempts to Firestore for audit."""
-    db.collection("security_logs").add({
-        "type":      "device_mismatch",
-        "device_id": device_id,
-        "user_id":   user_id,
-        "ip":        ip,
-        "timestamp": datetime.utcnow().isoformat()
-    })
+    """Persists suspicious access attempts to Postgres for audit."""
+    orm_db.session.add(SecurityLog(
+        type="device_mismatch",
+        device_id=device_id,
+        user_id=user_id,
+        ip=ip,
+    ))
+    orm_db.session.commit()
 
 
 # ──────────────────────────────────────────────
 # MULTI-DEVICE SESSION TOKENS
-# Validate a session against a *set* of valid tokens per user so any number of
-# devices can stay logged in concurrently. Login ADDS a token to the set;
-# logout removes only the current device's token.
+# Each login INSERTs its own row in user_sessions so any number of devices can
+# stay logged in concurrently; logout DELETEs only the current device's row.
 # ──────────────────────────────────────────────
 
-def _tokens_from_user(user: dict) -> list:
-    """Return the user's set of valid session tokens as a list.
-
-    Backward-compat: docs written before this change carry a single
-    ``active_session_token`` string and no ``active_session_tokens`` set. When
-    the set is absent, treat the legacy single token as a one-member set so
-    already-logged-in users are not kicked out on deploy."""
-    tokens = user.get("active_session_tokens")
-    if tokens is None:
-        legacy = user.get("active_session_token")
-        tokens = [legacy] if legacy else []
-    return [t for t in tokens if t]
+def create_session(user_id: str, token: str, device_id: str | None) -> None:
+    """Record a new logged-in device. The caller commits as part of the login
+    transaction."""
+    orm_db.session.add(UserSession(
+        token=token,
+        user_id=user_id,
+        device_id=device_id,
+    ))
 
 
-def merge_session_token(user: dict, new_token: str) -> list:
-    """Compute the new token set for a login: the user's existing valid tokens
-    (migrating a legacy single token if present) plus ``new_token``. Pure — the
-    caller persists the returned list. De-duplicates while preserving order."""
-    tokens = _tokens_from_user(user)
-    if new_token and new_token not in tokens:
-        tokens = tokens + [new_token]
-    return tokens
-
-
-def remove_session_token(user_id: str, token: str) -> None:
-    """Revoke a single device: remove ``token`` from the user's valid-token set,
-    leaving every other device's session intact. Best-effort — Firestore errors
-    are logged, not raised, matching the existing logout behaviour."""
+def remove_session_token(token: str) -> None:
+    """Revoke a single device by deleting its session row, leaving every other
+    device's session intact. Best-effort — errors are logged, not raised,
+    matching the existing logout behaviour."""
+    if not token:
+        return
     try:
-        user_ref = db.collection("users").document(user_id)
-        snapshot = user_ref.get()
-        if not snapshot.exists:
-            return
-        tokens = _tokens_from_user(snapshot.to_dict())
-        user_ref.update({
-            "active_session_tokens": [t for t in tokens if t != token],
-        })
+        orm_db.session.query(UserSession).filter_by(token=token).delete()
+        orm_db.session.commit()
     except Exception as e:
+        orm_db.session.rollback()
         current_app.logger.error(f"remove_session_token error: {e}")
 
 
@@ -296,46 +280,43 @@ def login():
             return redirect(url_for("auth.login"))
 
         # ── Fetch user ──────────────────────────────────────────
-        users    = db.collection("users").where(filter=FieldFilter("email", "==", email)).limit(1).stream()
-        user_doc = next(users, None)
+        user = orm_db.session.query(User).filter(User.email == email).first()
 
-        if not user_doc:
+        if not user:
             _increment_attempts(ip)
             flash("Invalid credentials.", "danger")
             return redirect(url_for("auth.login"))
 
-        user = user_doc.to_dict()
+        user_id = str(user.id)
 
         # ── Password check ──────────────────────────────────────
-        if not check_password_hash(user.get("password_hash", ""), password):
+        if not check_password_hash(user.password_hash or "", password):
             _increment_attempts(ip)
             flash("Invalid credentials.", "danger")
             return redirect(url_for("auth.login"))
 
         # ── Account status ──────────────────────────────────────
-        if user.get("status") == "Disabled":
+        if user.status == "Disabled":
             flash("Account disabled. Contact support.", "danger")
             return redirect(url_for("auth.login"))
 
         # ── Device binding ──────────────────────────────────────
-        stored_device = user.get("bound_device_id")
+        stored_device = user.bound_device_id
         if stored_device and stored_device != device_id:
             # Different device detected → audit log
             try:
-                log_suspicious_device(device_id, user_doc.id, ip)
+                log_suspicious_device(device_id, user_id, ip)
             except Exception as e:
+                orm_db.session.rollback()
                 current_app.logger.error(f"Device audit log error: {e}")
 
-        # ── New session token (ADDED to the set — other devices stay valid) ──
+        # ── New session token (INSERTed — other devices stay valid) ──
         new_session_token = secrets.token_hex(64)
-        update_payload: dict = {
-            "active_session_tokens": merge_session_token(user, new_session_token),
-            "last_login":            datetime.utcnow().isoformat(),
-            "bound_device_id":       device_id,
-            "last_ip":               ip,
-        }
-
-        db.collection("users").document(user_doc.id).update(update_payload)
+        create_session(user_id, new_session_token, device_id)
+        user.last_login = datetime.utcnow()
+        user.bound_device_id = device_id
+        user.last_ip = ip
+        orm_db.session.commit()
         _reset_attempts(ip)
 
         # ── Build session ───────────────────────────────────────
@@ -343,24 +324,20 @@ def login():
         session.permanent = True
         current_app.permanent_session_lifetime = timedelta(minutes=30)
 
-        session["user_id"]       = user_doc.id
+        session["user_id"]       = user_id
         session["email"]         = email
-        session["role"]          = user.get("role", "user")
+        session["role"]          = user.role or "user"
         session["session_token"] = new_session_token
         session["device_id"]     = device_id
 
-        # ── Subscription gate ───────────────────────────────────
-        # Re-fetch user to get the latest subscription data
-        try:
-            fresh_user = db.collection("users").document(user_doc.id).get().to_dict()
-        except Exception:
-            fresh_user = user  # fallback to cached copy
-        # if _subscription_is_active(fresh_user):
+        # ── Subscription gate (disabled) ─────────────────────────
+        # if _subscription_is_active(user_as_dict):
         #     flash("Welcome back!", "success")
         #     return redirect(url_for("payment.payment_page"))
         #
         # flash("A subscription is required to continue.", "warning")
-        profile = db.collection("student_profiles").document(user_doc.id).get()
+        # student_profiles stays on Firestore this slice; route by its presence.
+        profile = db.collection("student_profiles").document(user_id).get()
 
         if profile.exists:
             return redirect(url_for("user.dashboard"))
@@ -380,7 +357,7 @@ def logout():
     user_id = session.get("user_id")
     if user_id:
         # Revoke only THIS device's token → other devices stay logged in
-        remove_session_token(user_id, session.get("session_token"))
+        remove_session_token(session.get("session_token"))
     session.clear()
     flash("You have been logged out.", "info")
     resp = redirect(url_for("auth.login"))
@@ -395,60 +372,6 @@ def logout():
 # ══════════════════════════════════════════════
 
 _ALREADY_REGISTERED = "Email already registered. Please login or use another email."
-
-
-def delete_firebase_user(uid: str) -> bool:
-    """Best-effort, IRREVERSIBLE removal of a Firebase Auth record. Never raises.
-
-    Callers must only pass a uid that is (a) the authenticated, email-confirmed
-    user's own account being deleted, or (b) an Auth record proven to have no
-    Firestore user doc (orphan), or (c) a record this process just created."""
-    try:
-        admin_auth.delete_user(uid)
-        return True
-    except admin_auth.UserNotFoundError:
-        return True
-    except Exception as exc:
-        logger.warning(f"Firebase Auth delete failed for uid {uid}: {exc}")
-        return False
-
-
-def create_firebase_user_and_firestore(email: str, password: str, user_data: dict):
-    try:
-        try:
-            existing = admin_auth.get_user_by_email(email)
-        except admin_auth.UserNotFoundError:
-            existing = None
-
-        if existing is not None:
-            # HARD GUARD: only delete the Auth record when NO Firestore users doc
-            # exists for it (by email OR by uid). An Auth record with a live
-            # Firestore user is a real account and must never be deleted.
-            by_email = (
-                db.collection("users")
-                .where(filter=FieldFilter("email", "==", email))
-                .limit(1)
-                .get()
-            )
-            by_uid = db.collection("users").document(existing.uid).get()
-            if by_email or by_uid.exists:
-                return None, _ALREADY_REGISTERED
-            # Orphaned Auth record (e.g. left by a past account deletion or a
-            # partial registration failure): clear it and register normally.
-            if not delete_firebase_user(existing.uid):
-                return None, "Could not clear stale authentication record."
-
-        user_record = admin_auth.create_user(email=email, password=password)
-        uid = user_record.uid
-        try:
-            db.collection("users").document(uid).set(user_data)
-        except Exception:
-            # Roll back the just-created Auth record so no orphan is left behind.
-            delete_firebase_user(uid)
-            raise
-        return uid, None
-    except Exception as e:
-        return None, str(e)
 
 
 @auth_bp.route("/register", methods=["GET", "POST"])
@@ -476,31 +399,30 @@ def registration():
             flash("Too many registrations from this IP. Try again later.", "danger")
             return redirect(url_for("auth.registration"))
 
-        existing = db.collection("users") \
-            .where(filter=FieldFilter("email", "==", email)) \
-            .limit(1).get()
-        if existing:
+        # Email uniqueness is enforced by the Postgres UNIQUE(email) constraint;
+        # a duplicate raises IntegrityError on commit.
+        user = User(
+            username=username,
+            email=email,
+            role="user",
+            password_hash=generate_password_hash(password),
+            bound_device_id=None,
+            subscription_status=False,
+            subscription_expiry=None,
+            status="Active",
+            has_completed_tour=False,
+            has_completed_onboarding=False,
+            last_login=None,
+        )
+        orm_db.session.add(user)
+        try:
+            orm_db.session.commit()
+        except IntegrityError:
+            orm_db.session.rollback()
             flash("Email already registered. Please login.", "warning")
             return redirect(url_for("auth.login"))
-
-        user_data = {
-            "username":             username,
-            "email":                email,
-            "role":                 "user",
-            "password_hash":        generate_password_hash(password),
-            "active_session_tokens": [],
-            "bound_device_id":      None,
-            "subscription_status":  False,
-            "subscription_expiry":  None,
-            "status":               "Active",
-            "has_completed_tour":   False,
-            "has_completed_onboarding": False,
-            "created_at":           datetime.utcnow().isoformat(),
-            "last_login":           None,
-        }
-
-        uid, error = create_firebase_user_and_firestore(email, password, user_data)
-        if error:
+        except Exception as error:
+            orm_db.session.rollback()
             flash(f"Registration error: {error}", "danger")
             return redirect(url_for("auth.registration"))
 
