@@ -2,6 +2,11 @@ import logging
 import os
 from datetime import datetime
 from celery import Celery
+from redis.exceptions import (
+    ConnectionError as RedisConnectionError,
+    TimeoutError as RedisTimeoutError,
+)
+from kombu.exceptions import OperationalError as KombuOperationalError
 from firebase_admin import firestore
 from firebase import db
 from website_analyzer import fetch_website_html, analyze_html
@@ -36,9 +41,38 @@ celery = Celery(
     broker=redis_url,
     backend=redis_url,
 )
+
+# acks_late + reject_on_worker_lost: a crash/redeploy mid-task (the single
+# --pool=solo worker lives inside the Render web service) redelivers the task
+# instead of silently dropping it. Safe only because every write on this path is
+# now idempotent (deterministic doc ids + dedupe guards). result_expires bounds
+# Redis result keys so they don't accumulate on the 512MB free tier.
+celery.conf.task_acks_late = True
+celery.conf.task_reject_on_worker_lost = True
+celery.conf.result_expires = 86400  # 24h
+
+# Retry ONLY transient broker/redis/transport errors. This is deliberately an
+# allow-list: groq.RateLimitError/429 (owned by agent/groq_client.py's in-call
+# retry+failover) and all deterministic logic/validation errors (ValueError,
+# PermissionError — "Business not found", "no website_url", "Action must be
+# approved", etc.) are NOT listed, so they never retry and never burn budget.
+TRANSIENT_BROKER_ERRORS = (
+    RedisConnectionError,
+    RedisTimeoutError,
+    KombuOperationalError,
+)
+RETRY_OPTS = dict(
+    autoretry_for=TRANSIENT_BROKER_ERRORS,
+    retry_backoff=True,
+    retry_jitter=True,
+    max_retries=3,
+)
+
+
 @celery.task(
     bind=True,
-    name="tasks.execute_approved_action"
+    name="tasks.execute_approved_action",
+    **RETRY_OPTS,
 )
 def execute_approved_action(
     self,
@@ -50,7 +84,7 @@ def execute_approved_action(
         execution_id,
     )
 
-@celery.task(bind=True, name="tasks.analyze_business_website")
+@celery.task(bind=True, name="tasks.analyze_business_website", **RETRY_OPTS)
 def analyze_business_website(self, business_id, user_id, run_id):
     business_ref = db.collection("businesses").document(business_id)
     run_ref = business_ref.collection("agent_runs").document(run_id)
@@ -137,10 +171,12 @@ def analyze_business_website(self, business_id, user_id, run_id):
             "created_at": datetime.utcnow().isoformat(),
         }
 
+        # Deterministic id keyed on run_id: a task redelivery (acks_late) must
+        # overwrite the same observation doc, not append a duplicate.
         observation_ref = (
             business_ref
             .collection("observations")
-            .document()
+            .document(run_id)
         )
 
         observation_ref.set(observation)
@@ -230,7 +266,7 @@ def analyze_business_website(self, business_id, user_id, run_id):
 
         raise
 
-@celery.task(bind=True, name="tasks.run_agent_cycle")
+@celery.task(bind=True, name="tasks.run_agent_cycle", **RETRY_OPTS)
 def run_agent_cycle(self, business_id, user_id, run_id):
     run_ref = (
         db.collection("businesses")
@@ -238,6 +274,21 @@ def run_agent_cycle(self, business_id, user_id, run_id):
         .collection("agent_runs")
         .document(run_id)
     )
+
+    # Idempotency: if a prior delivery already dispatched the analysis child
+    # (analysis_task_id is the dispatch marker set after the first .delay), a
+    # redelivery of run_agent_cycle must NOT enqueue a second child. Missing run
+    # doc -> {} -> proceed normally (don't crash).
+    run_doc = run_ref.get()
+    run_data = run_doc.to_dict() if run_doc.exists else {}
+    existing_task_id = run_data.get("analysis_task_id")
+    if existing_task_id:
+        return {
+            "success": True,
+            "run_id": run_id,
+            "analysis_task_id": existing_task_id,
+            "already_dispatched": True,
+        }
 
     run_ref.update({
         "status": "running",
@@ -273,7 +324,7 @@ def run_agent_cycle(self, business_id, user_id, run_id):
         raise
 
 
-@celery.task(bind=True, name="tasks.run_gtm_analysis")
+@celery.task(bind=True, name="tasks.run_gtm_analysis", **RETRY_OPTS)
 def run_gtm_analysis(self, business_id, user_id, run_id):
     """
     Asynchronous Visual GTM Analysis Task.

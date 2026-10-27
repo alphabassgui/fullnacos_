@@ -252,3 +252,38 @@ def test_execute_action_running_action_retry_safe(execution_env, monkeypatch):
 
     assert biz_ref.collection("executions").document("e1").data["status"] == "completed"
     assert biz_ref.collection("actions").document("a1").data["status"] == "completed"
+
+
+def test_execute_action_completed_is_noop_on_redelivery(execution_env, monkeypatch):
+    # acks_late redelivery after a completed execution must be a pure no-op: it
+    # returns the stored result and writes NO second measurement/learning (which
+    # would otherwise double-count the execution's success).
+    execution_engine, db = execution_env
+    biz_ref = db.collection("businesses").document("b1")
+    stored_result = {"success": True, "status": "published"}
+    biz_ref.collection("executions").document("e1").set(
+        {"action_id": "a1", "status": "completed", "result": stored_result}
+    )
+    biz_ref.collection("actions").document("a1").set(
+        {"action_type": "social", "status": "completed"}
+    )
+
+    counts = {"measurement": 0, "learning": 0}
+
+    def fake_measurement(**kwargs):
+        counts["measurement"] += 1
+        return {"id": "m1"}
+
+    def fake_learning(**kwargs):
+        counts["learning"] += 1
+        return {"id": "l1"}
+
+    monkeypatch.setattr(execution_engine, "record_measurement", fake_measurement)
+    monkeypatch.setattr(
+        execution_engine, "create_learning_from_measurement", fake_learning
+    )
+
+    result = execution_engine.execute_action("b1", "e1")
+
+    assert result == stored_result
+    assert counts == {"measurement": 0, "learning": 0}
