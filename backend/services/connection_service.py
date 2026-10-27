@@ -7,6 +7,8 @@ import requests
 from services.token_encryption import encrypt_token, decrypt_token
 from firebase import db
 
+from models import get_business_row
+
 logger = logging.getLogger(__name__)
 
 # Short timeout so a slow/unreachable provider never stalls account deletion.
@@ -20,22 +22,22 @@ def create_connection(
     connection_data,
 ):
 
+    # Parent business lives in Postgres now; the connections subcollection
+    # stays on Firestore keyed by the id string (business_ref below).
+    business = get_business_row(business_id)
+
+    if business is None:
+        raise ValueError("Business not found")
+
+    if str(business.owner_id) != user_id:
+        raise PermissionError(
+            "You do not have permission to modify this business"
+        )
+
     business_ref = (
         db.collection("businesses")
         .document(business_id)
     )
-
-    business_doc = business_ref.get()
-
-    if not business_doc.exists:
-        raise ValueError("Business not found")
-
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != user_id:
-        raise PermissionError(
-            "You do not have permission to modify this business"
-        )
 
     now = datetime.utcnow().isoformat()
 
@@ -84,22 +86,22 @@ def get_connection(
     only to backend code that explicitly needs it.
     """
 
+    # Parent business lives in Postgres now; the connections subcollection
+    # stays on Firestore keyed by the id string (business_ref below).
+    business = get_business_row(business_id)
+
+    if business is None:
+        raise ValueError("Business not found")
+
+    if str(business.owner_id) != user_id:
+        raise PermissionError(
+            "You do not have permission to access this business"
+        )
+
     business_ref = (
         db.collection("businesses")
         .document(business_id)
     )
-
-    business_doc = business_ref.get()
-
-    if not business_doc.exists:
-        raise ValueError("Business not found")
-
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != user_id:
-        raise PermissionError(
-            "You do not have permission to access this business"
-        )
 
     connections = (
         business_ref
@@ -191,22 +193,22 @@ def delete_connection(
     0 means nothing was connected.
     """
 
+    # Parent business lives in Postgres now; the connections subcollection
+    # stays on Firestore keyed by the id string (business_ref below).
+    business = get_business_row(business_id)
+
+    if business is None:
+        raise ValueError("Business not found")
+
+    if str(business.owner_id) != user_id:
+        raise PermissionError(
+            "You do not have permission to modify this business"
+        )
+
     business_ref = (
         db.collection("businesses")
         .document(business_id)
     )
-
-    business_doc = business_ref.get()
-
-    if not business_doc.exists:
-        raise ValueError("Business not found")
-
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != user_id:
-        raise PermissionError(
-            "You do not have permission to modify this business"
-        )
 
     connections = (
         business_ref

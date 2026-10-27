@@ -2,6 +2,7 @@ from flask import Blueprint, render_template, request, redirect, url_for, flash,
 from firebase_admin import auth as admin_auth
 from firebase import db
 from google.cloud.firestore_v1.base_query import FieldFilter
+from sqlalchemy.exc import IntegrityError
 from task import analyze_business_website
 from datetime import datetime
 import uuid
@@ -11,6 +12,8 @@ from task import execute_approved_action
 from google.cloud import firestore
 from task import execute_approved_action
 from validations import validate_website_url
+from extensions import db as orm_db
+from models import Business, business_to_dict, get_business_row
 
 user_bp = Blueprint("user", __name__, template_folder="../templates")
 
@@ -26,20 +29,13 @@ def business():
         return redirect(url_for("auth.login"))
 
     businesses = (
-        db.collection("businesses")
-        .where("owner_id", "==", user_id)
-        .stream()
+        Business.query
+        .filter_by(owner_id=user_id)
+        .order_by(Business.created_at)
+        .all()
     )
 
-    business_list = []
-
-    for business_doc in businesses:
-        data = business_doc.to_dict()
-
-        business_list.append({
-            "id": business_doc.id,
-            **data
-        })
+    business_list = [business_to_dict(business) for business in businesses]
 
     return render_template(
         "business.html",
@@ -89,17 +85,7 @@ def create_business():
             "error": "Business name is required"
         }), 400
 
-    now = datetime.utcnow().isoformat()
-
-    business_data = {
-        "owner_id": user_id,
-        "name": name,
-        "website_url": website_url,
-        "industry": industry,
-        "description": description,
-        "created_at": now,
-        "updated_at": now,
-    }
+    now = datetime.utcnow()
 
     # ─────────────────────────────────────────────────────────
     # Duplicate-business guard
@@ -108,39 +94,58 @@ def create_business():
     # NORMALIZED value from validate_website_url above (never the raw
     # input). A name-only business (blank website_url) can be created
     # legitimately during onboarding, so it is never blocked, and we
-    # never dedupe on name.
+    # never dedupe on name. A pre-insert SELECT returns the identical 409;
+    # the partial UNIQUE (owner_id, website_url) is the race backstop.
     # ─────────────────────────────────────────────────────────
 
-    if website_url:
+    def _duplicate_response():
         existing = (
-            db.collection("businesses")
-            .where(filter=FieldFilter("owner_id", "==", user_id))
-            .where(filter=FieldFilter("website_url", "==", website_url))
-            .stream()
+            Business.query
+            .filter_by(owner_id=user_id, website_url=website_url)
+            .first()
         )
+        if existing is None:
+            return None
+        return jsonify({
+            "success": False,
+            "error": "You already have a business with this website.",
+            "existing_business": {
+                "id": str(existing.id),
+                "name": existing.name,
+                "website_url": existing.website_url,
+            },
+        }), 409
 
-        for existing_doc in existing:
-            existing_data = existing_doc.to_dict()
-            return jsonify({
-                "success": False,
-                "error": "You already have a business with this website.",
-                "existing_business": {
-                    "id": existing_doc.id,
-                    "name": existing_data.get("name"),
-                    "website_url": existing_data.get("website_url"),
-                },
-            }), 409
+    if website_url:
+        duplicate = _duplicate_response()
+        if duplicate is not None:
+            return duplicate
 
-    business_ref = db.collection("businesses").document()
-    business_ref.set(business_data)
+    business = Business(
+        owner_id=user_id,
+        name=name,
+        website_url=website_url,
+        industry=industry,
+        description=description,
+        created_at=now,
+        updated_at=now,
+    )
+    orm_db.session.add(business)
+
+    try:
+        orm_db.session.commit()
+    except IntegrityError:
+        # Concurrent insert won the partial UNIQUE race — return the same 409.
+        orm_db.session.rollback()
+        duplicate = _duplicate_response()
+        if duplicate is not None:
+            return duplicate
+        raise
 
     return jsonify({
         "success": True,
         "message": "Business created successfully",
-        "business": {
-            "id": business_ref.id,
-            **business_data
-        }
+        "business": business_to_dict(business),
     }), 201
 
 
@@ -159,22 +164,19 @@ def update_business(business_id):
             "error": "Authentication required"
         }), 401
 
-    business_ref = db.collection("businesses").document(business_id)
-    business_doc = business_ref.get()
+    business = get_business_row(business_id)
 
-    if not business_doc.exists:
+    if business is None:
         return jsonify({
             "success": False,
             "error": "Business not found"
         }), 404
 
-    business_data = business_doc.to_dict()
-
     # ─────────────────────────────────────────────────────────
     # Ownership check
     # ─────────────────────────────────────────────────────────
 
-    if business_data.get("owner_id") != user_id:
+    if str(business.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not have permission to modify this business"
@@ -250,9 +252,16 @@ def update_business(business_id):
     # Update timestamp
     # ─────────────────────────────────────────────────────────
 
-    updates["updated_at"] = datetime.utcnow().isoformat()
+    now = datetime.utcnow()
+    updates["updated_at"] = now.isoformat()
 
-    business_ref.update(updates)
+    for key, value in updates.items():
+        if key == "updated_at":
+            business.updated_at = now
+        else:
+            setattr(business, key, value)
+
+    orm_db.session.commit()
 
     return jsonify({
         "success": True,
@@ -280,39 +289,40 @@ def delete_business(business_id):
     # Get business
     # ─────────────────────────────────────────────────────────
 
-    business_ref = db.collection("businesses").document(business_id)
-    business_doc = business_ref.get()
+    business = get_business_row(business_id)
 
-    if not business_doc.exists:
+    if business is None:
         return jsonify({
             "success": False,
             "error": "Business not found"
         }), 404
 
-    business_data = business_doc.to_dict()
-
     # ─────────────────────────────────────────────────────────
     # Ownership check
     # ─────────────────────────────────────────────────────────
 
-    if business_data.get("owner_id") != user_id:
+    if str(business.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not have permission to delete this business"
         }), 403
 
     # ─────────────────────────────────────────────────────────
-    # Delete business (cascade)
+    # Transitional delete (children still on Firestore this slice)
     #
-    # Firestore does NOT delete subcollections when a parent doc is
-    # deleted, so a plain .delete() orphans every owned subcollection
-    # (opportunities, actions, executions, measurements, learnings,
-    # connections, gtm_runs, agent_runs, observations, and any others).
-    # google-cloud-firestore 2.30.0 provides recursive_delete, which
-    # removes the doc plus every nested subcollection.
+    # Delete the Postgres business row, then recursively delete the
+    # Firestore children addressed by the SAME business id string. Firestore
+    # does NOT delete subcollections when a parent doc is deleted (and the
+    # parent doc no longer lives there anyway), so recursive_delete is still
+    # required to remove the orphaned subcollections (opportunities, actions,
+    # executions, measurements, learnings, connections, gtm_runs, agent_runs,
+    # observations). Full single-store cascade is a later slice.
     # ─────────────────────────────────────────────────────────
 
-    db.recursive_delete(business_ref)
+    orm_db.session.delete(business)
+    orm_db.session.commit()
+
+    db.recursive_delete(db.collection("businesses").document(business_id))
 
     # TODO: Supabase tile blobs for this business's gtm_runs are stored
     # outside Firestore and are NOT removed by this cascade — that belongs
@@ -342,23 +352,21 @@ def analyze_business(business_id):
         }), 401
 
     business_ref = db.collection("businesses").document(business_id)
-    business_doc = business_ref.get()
+    business = get_business_row(business_id)
 
-    if not business_doc.exists:
+    if business is None:
         return jsonify({
             "success": False,
             "error": "Business not found"
         }), 404
 
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != user_id:
+    if str(business.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not have permission to analyze this business"
         }), 403
 
-    if not business.get("website_url"):
+    if not business.website_url:
         return jsonify({
             "success": False,
             "error": "This business does not have a website URL"
@@ -424,17 +432,15 @@ def get_business_opportunities(business_id):
         }), 401
 
     business_ref = db.collection("businesses").document(business_id)
-    business_doc = business_ref.get()
+    business = get_business_row(business_id)
 
-    if not business_doc.exists:
+    if business is None:
         return jsonify({
             "success": False,
             "error": "Business not found"
         }), 404
 
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != user_id:
+    if str(business.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not have permission to view this business"
@@ -473,17 +479,15 @@ def get_opportunity(business_id, opportunity_id):
         }), 401
 
     business_ref = db.collection("businesses").document(business_id)
-    business_doc = business_ref.get()
+    business = get_business_row(business_id)
 
-    if not business_doc.exists:
+    if business is None:
         return jsonify({
             "success": False,
             "error": "Business not found"
         }), 404
 
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != user_id:
+    if str(business.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not have permission to view this business"
@@ -530,17 +534,15 @@ def get_latest_run(business_id):
         }), 401
 
     business_ref = db.collection("businesses").document(business_id)
-    business_doc = business_ref.get()
+    business = get_business_row(business_id)
 
-    if not business_doc.exists:
+    if business is None:
         return jsonify({
             "success": False,
             "error": "Business not found"
         }), 404
 
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != user_id:
+    if str(business.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not have permission to view this business"
@@ -587,17 +589,15 @@ def approve_action(business_id, action_id):
         .document(business_id)
     )
 
-    business_doc = business_ref.get()
+    business = get_business_row(business_id)
 
-    if not business_doc.exists:
+    if business is None:
         return jsonify({
             "success": False,
             "error": "Business not found",
         }), 404
 
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != user_id:
+    if str(business.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not have permission to modify this business",
@@ -792,17 +792,15 @@ def reject_action(business_id, action_id):
         }), 401
 
     business_ref = db.collection("businesses").document(business_id)
-    business_doc = business_ref.get()
+    business = get_business_row(business_id)
 
-    if not business_doc.exists:
+    if business is None:
         return jsonify({
             "success": False,
             "error": "Business not found"
         }), 404
 
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != user_id:
+    if str(business.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not have permission to modify this business"
@@ -863,17 +861,15 @@ def get_action(business_id, action_id):
         }), 401
 
     business_ref = db.collection("businesses").document(business_id)
-    business_doc = business_ref.get()
+    business = get_business_row(business_id)
 
-    if not business_doc.exists:
+    if business is None:
         return jsonify({
             "success": False,
             "error": "Business not found"
         }), 404
 
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != user_id:
+    if str(business.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not have permission to view this business"
@@ -920,17 +916,15 @@ def get_business_actions(business_id):
         }), 401
 
     business_ref = db.collection("businesses").document(business_id)
-    business_doc = business_ref.get()
+    business = get_business_row(business_id)
 
-    if not business_doc.exists:
+    if business is None:
         return jsonify({
             "success": False,
             "error": "Business not found"
         }), 404
 
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != user_id:
+    if str(business.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not have permission to view this business"
@@ -979,17 +973,15 @@ def test_action_execution(business_id):
         }), 401
 
     business_ref = db.collection("businesses").document(business_id)
-    business_doc = business_ref.get()
+    business = get_business_row(business_id)
 
-    if not business_doc.exists:
+    if business is None:
         return jsonify({
             "success": False,
             "error": "Business not found",
         }), 404
 
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != user_id:
+    if str(business.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not have permission to execute actions for this business",
@@ -1082,17 +1074,15 @@ def create_dry_run_action(business_id):
         }), 401
 
     business_ref = db.collection("businesses").document(business_id)
-    business_doc = business_ref.get()
+    business = get_business_row(business_id)
 
-    if not business_doc.exists:
+    if business is None:
         return jsonify({
             "success": False,
             "error": "Business not found",
         }), 404
 
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != user_id:
+    if str(business.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not have permission to modify this business",
@@ -1143,17 +1133,15 @@ def get_execution_status(business_id, execution_id):
         }), 401
 
     business_ref = db.collection("businesses").document(business_id)
-    business_doc = business_ref.get()
+    business = get_business_row(business_id)
 
-    if not business_doc.exists:
+    if business is None:
         return jsonify({
             "success": False,
             "error": "Business not found",
         }), 404
 
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != user_id:
+    if str(business.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not have permission to view this business",
@@ -1203,17 +1191,15 @@ def create_test_approval_action(business_id):
         }), 401
 
     business_ref = db.collection("businesses").document(business_id)
-    business_doc = business_ref.get()
+    business = get_business_row(business_id)
 
-    if not business_doc.exists:
+    if business is None:
         return jsonify({
             "success": False,
             "error": "Business not found",
         }), 404
 
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != user_id:
+    if str(business.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not have permission to modify this business",
@@ -1272,17 +1258,15 @@ def get_business_measurements(business_id):
         .document(business_id)
     )
 
-    business_doc = business_ref.get()
+    business = get_business_row(business_id)
 
-    if not business_doc.exists:
+    if business is None:
         return jsonify({
             "success": False,
             "error": "Business not found",
         }), 404
 
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != user_id:
+    if str(business.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not have permission to view this business",
@@ -1345,17 +1329,15 @@ def get_business_learnings(business_id):
         .document(business_id)
     )
 
-    business_doc = business_ref.get()
+    business = get_business_row(business_id)
 
-    if not business_doc.exists:
+    if business is None:
         return jsonify({
             "success": False,
             "error": "Business not found",
         }), 404
 
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != user_id:
+    if str(business.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not have permission to view this business",

@@ -11,7 +11,7 @@ import services.connection_service as connection_service
 import services.tile_storage_service as tile_storage_service
 from extensions import db as orm_db
 from firebase import db
-from models import User
+from models import Business, User
 
 api_auth_bp = Blueprint("api_auth", __name__)
 
@@ -30,15 +30,11 @@ def _has_onboarding_evidence(user_id):
     best-effort — any Firestore error returns False so /api/auth/me falls back to
     the stored flag (default False)."""
     try:
-        businesses = (
-            db.collection("businesses")
-            .where(filter=FieldFilter("owner_id", "==", user_id))
-            .stream()
-        )
+        businesses = Business.query.filter_by(owner_id=user_id).all()
         for business in businesses:
             completed = (
                 db.collection("businesses")
-                .document(business.id)
+                .document(str(business.id))
                 .collection("agent_runs")
                 .where(filter=FieldFilter("analysis_status", "==", "completed"))
                 .limit(1)
@@ -327,12 +323,12 @@ def api_delete_account():
                 "error": "Email confirmation does not match",
             }), 400
 
-        # ── Enumerate the user's businesses up front ──
+        # ── Enumerate the user's businesses up front (Postgres now; the id,
+        #    str()'d, is still the Firestore subcollection path segment for the
+        #    children that stay on Firestore this slice) ──
         business_ids = [
-            business.id
-            for business in db.collection("businesses")
-            .where(filter=FieldFilter("owner_id", "==", user_id))
-            .stream()
+            str(business.id)
+            for business in Business.query.filter_by(owner_id=user_id).all()
         ]
 
         # ── Per business: best-effort provider revocation + tile cleanup,

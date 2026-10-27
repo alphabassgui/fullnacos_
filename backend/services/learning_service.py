@@ -4,6 +4,8 @@ from firebase import db
 from firebase import db
 from google.cloud import firestore
 
+from models import get_business_row
+
 def create_learning(
     business_id,
     execution_id,
@@ -54,15 +56,15 @@ def create_learning(
     if confidence < 0 or confidence > 1:
         raise ValueError("confidence must be between 0 and 1")
 
+    # Parent business lives in Postgres now (existence-only check); the
+    # executions/actions/learnings subcollections stay on Firestore by id.
+    if get_business_row(business_id) is None:
+        raise ValueError("Business not found")
+
     business_ref = (
         db.collection("businesses")
         .document(business_id)
     )
-
-    business_doc = business_ref.get()
-
-    if not business_doc.exists:
-        raise ValueError("Business not found")
 
     execution_ref = (
         business_ref
@@ -190,15 +192,15 @@ def create_learning_from_measurement(
     if not measurement_id:
         raise ValueError("measurement_id is required")
 
+    # Parent business lives in Postgres now (existence-only check); the
+    # measurements subcollection stays on Firestore by id.
+    if get_business_row(business_id) is None:
+        raise ValueError("Business not found")
+
     business_ref = (
         db.collection("businesses")
         .document(business_id)
     )
-
-    business_doc = business_ref.get()
-
-    if not business_doc.exists:
-        raise ValueError("Business not found")
 
     measurement_ref = (
         business_ref
@@ -260,15 +262,15 @@ def get_business_learnings(
     if limit <= 0:
         raise ValueError("limit must be greater than 0")
 
+    # Parent business lives in Postgres now (existence-only check); the
+    # learnings subcollection stays on Firestore by id.
+    if get_business_row(business_id) is None:
+        raise ValueError("Business not found")
+
     business_ref = (
         db.collection("businesses")
         .document(business_id)
     )
-
-    business_doc = business_ref.get()
-
-    if not business_doc.exists:
-        raise ValueError("Business not found")
 
     learnings_query = (
         business_ref

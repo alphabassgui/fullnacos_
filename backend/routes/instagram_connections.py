@@ -18,6 +18,7 @@ from config.instagram import (
     validate_instagram_config,
 )
 from firebase import db
+from models import get_business_row
 from services.connection_service import (
     create_connection,
 )
@@ -58,22 +59,15 @@ def connect_instagram():
             "error": "business_id is required",
         }), 400
 
-    business_ref = (
-        db.collection("businesses")
-        .document(business_id)
-    )
+    business = get_business_row(business_id)
 
-    business_doc = business_ref.get()
-
-    if not business_doc.exists:
+    if business is None:
         return jsonify({
             "success": False,
             "error": "Business not found",
         }), 404
 
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != user_id:
+    if str(business.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": (
@@ -155,22 +149,15 @@ def instagram_callback():
             "error": "Invalid OAuth state",
         }), 400
 
-    business_ref = (
-        db.collection("businesses")
-        .document(business_id)
-    )
+    business = get_business_row(business_id)
 
-    business_doc = business_ref.get()
-
-    if not business_doc.exists:
+    if business is None:
         return jsonify({
             "success": False,
             "error": "Business not found",
         }), 404
 
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != user_id:
+    if str(business.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not own this business",
@@ -267,26 +254,25 @@ def instagram_connection_status():
             "error": "business_id is required",
         }), 400
 
-    business_ref = (
-        db.collection("businesses")
-        .document(business_id)
-    )
+    business = get_business_row(business_id)
 
-    business_doc = business_ref.get()
-
-    if not business_doc.exists:
+    if business is None:
         return jsonify({
             "success": False,
             "error": "Business not found",
         }), 404
 
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != user_id:
+    if str(business.owner_id) != user_id:
         return jsonify({
             "success": False,
             "error": "You do not have permission to view this business",
         }), 403
+
+    # connections subcollection stays on Firestore keyed by the id string.
+    business_ref = (
+        db.collection("businesses")
+        .document(business_id)
+    )
 
     connections = (
         business_ref

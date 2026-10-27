@@ -9,6 +9,7 @@ from redis.exceptions import (
 from kombu.exceptions import OperationalError as KombuOperationalError
 from firebase_admin import firestore
 from firebase import db
+from models import get_business_row
 from website_analyzer import fetch_website_html, analyze_html
 from services.execution_engine import execute_action
 
@@ -41,6 +42,28 @@ celery = Celery(
     broker=redis_url,
     backend=redis_url,
 )
+
+
+class ContextTask(celery.Task):
+    """Run every task body inside a Flask application context so SQLAlchemy
+    `db.session` (Postgres, from the Firestore->Supabase migration) works in the
+    worker. The worker is started with `celery -A task worker` and never pushes
+    an app context on its own; the parent-business lookup (and the services it
+    calls) now read Postgres, which requires one.
+
+    The `from app import app` is LAZY (inside __call__, not at module top) so the
+    worker's import of this module stays free of the app<->routes<->task import
+    cycle — by the time a task actually runs, `app` is fully imported.
+    """
+
+    def __call__(self, *args, **kwargs):
+        from app import app
+
+        with app.app_context():
+            return super().__call__(*args, **kwargs)
+
+
+celery.Task = ContextTask
 
 # acks_late + reject_on_worker_lost: a crash/redeploy mid-task (the single
 # --pool=solo worker lives inside the Render web service) redelivers the task
@@ -89,9 +112,11 @@ def analyze_business_website(self, business_id, user_id, run_id):
     business_ref = db.collection("businesses").document(business_id)
     run_ref = business_ref.collection("agent_runs").document(run_id)
 
-    business_doc = business_ref.get()
+    # Parent business now lives in Postgres; its children (agent_runs,
+    # observations, opportunities, ...) stay on Firestore keyed by the id string.
+    business = get_business_row(business_id)
 
-    if not business_doc.exists:
+    if business is None:
         run_ref.update({
             "analysis_status": "failed",
             "status": "failed",
@@ -103,9 +128,7 @@ def analyze_business_website(self, business_id, user_id, run_id):
             "error": "Business not found",
         }
 
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != user_id:
+    if str(business.owner_id) != user_id:
         run_ref.update({
             "analysis_status": "failed",
             "status": "failed",
@@ -117,7 +140,7 @@ def analyze_business_website(self, business_id, user_id, run_id):
             "error": "Unauthorized",
         }
 
-    website_url = business.get("website_url")
+    website_url = business.website_url
 
     if not website_url:
         run_ref.update({
@@ -362,13 +385,11 @@ def run_gtm_analysis(self, business_id, user_id, run_id):
         )
         from services.opportunity_service import create_opportunity
 
-        # 1. Fetch business doc
-        business_ref = db.collection("businesses").document(business_id)
-        business_doc = business_ref.get()
-        if not business_doc.exists:
+        # 1. Fetch business (Postgres now; children stay on Firestore by id)
+        business = get_business_row(business_id)
+        if business is None:
             raise ValueError("Business not found")
-        business_data = business_doc.to_dict() or {}
-        website_url = business_data.get("website_url")
+        website_url = business.website_url
         if not website_url:
             raise ValueError("Business has no website_url configured")
 

@@ -2,6 +2,8 @@ from agent.decision_engine import generate_action
 from services.action_service import create_action
 from google.cloud.firestore_v1.base_query import FieldFilter
 
+from models import get_business_row
+
 def create_action_from_opportunity(
     business_id,
     opportunity_id,
@@ -20,24 +22,24 @@ def create_action_from_opportunity(
     if not isinstance(business_analysis, dict):
         raise ValueError("business_analysis must be a dictionary")
 
+    # Parent business lives in Postgres now; the opportunities subcollection
+    # stays on Firestore keyed by the id string (business_ref below).
+    business = get_business_row(business_id)
+
+    if business is None:
+        raise ValueError("Business not found")
+
+    if str(business.owner_id) != owner_id:
+        raise ValueError(
+            "Owner does not have access to this business"
+        )
+
     from firebase import db
 
     business_ref = (
         db.collection("businesses")
         .document(business_id)
     )
-
-    business_doc = business_ref.get()
-
-    if not business_doc.exists:
-        raise ValueError("Business not found")
-
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != owner_id:
-        raise ValueError(
-            "Owner does not have access to this business"
-        )
 
     opportunity_ref = (
         business_ref
@@ -91,24 +93,24 @@ def generate_actions_for_opportunities(
     if not isinstance(business_analysis, dict):
         raise ValueError("business_analysis must be a dictionary")
 
+    # Parent business lives in Postgres now; the opportunities subcollection
+    # stays on Firestore keyed by the id string (business_ref below).
+    business = get_business_row(business_id)
+
+    if business is None:
+        raise ValueError("Business not found")
+
+    if str(business.owner_id) != owner_id:
+        raise ValueError(
+            "Owner does not have access to this business"
+        )
+
     from firebase import db
 
     business_ref = (
         db.collection("businesses")
         .document(business_id)
     )
-
-    business_doc = business_ref.get()
-
-    if not business_doc.exists:
-        raise ValueError("Business not found")
-
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != owner_id:
-        raise ValueError(
-            "Owner does not have access to this business"
-        )
 
     if opportunity_ids is None:
         opportunity_docs = (

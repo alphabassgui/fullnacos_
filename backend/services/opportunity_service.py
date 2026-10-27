@@ -3,6 +3,8 @@ import re
 from firebase import db
 from google.cloud.firestore_v1.base_query import FieldFilter
 
+from models import get_business_row
+
 def _normalize_text(value):
     if not value:
         return ""
@@ -45,22 +47,22 @@ def create_opportunity(
             f"{sorted(missing_fields)}"
         )
 
+    # Parent business lives in Postgres now; the opportunities subcollection
+    # stays on Firestore keyed by the id string (business_ref below).
+    business = get_business_row(business_id)
+
+    if business is None:
+        raise ValueError("Business not found")
+
+    if str(business.owner_id) != owner_id:
+        raise ValueError(
+            "Owner does not have access to this business"
+        )
+
     business_ref = (
         db.collection("businesses")
         .document(business_id)
     )
-
-    business_doc = business_ref.get()
-
-    if not business_doc.exists:
-        raise ValueError("Business not found")
-
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != owner_id:
-        raise ValueError(
-            "Owner does not have access to this business"
-        )
 
     existing_opportunity = find_existing_opportunity(
         business_id=business_id,

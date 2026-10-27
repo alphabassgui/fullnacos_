@@ -1,4 +1,12 @@
+import uuid
+
 import pytest
+from werkzeug.security import generate_password_hash
+
+from models import Business, User, business_to_dict
+
+# A syntactically valid UUID that is never seeded — the "unknown business" path.
+ABSENT_UUID = "00000000-0000-0000-0000-000000000000"
 
 
 @pytest.fixture
@@ -13,81 +21,31 @@ def client(flask_app):
     return flask_app.test_client()
 
 
-class BizSnapshot:
-    def __init__(self, data, doc_id):
-        self.exists = data is not None
-        self._data = dict(data) if data else {}
-        self.id = doc_id
-
-    def to_dict(self):
-        return dict(self._data)
+# ──────────────────────────────────────────────
+# Postgres seed helpers (slice c: businesses live in Postgres now).
+# ──────────────────────────────────────────────
 
 
-class BizQuery:
-    def __init__(self, snapshots):
-        self._snapshots = list(snapshots)
-
-    def stream(self):
-        return iter(self._snapshots)
-
-
-class BizRef:
-    def __init__(self, db, path):
-        self._db = db
-        self.path = tuple(path)
-        self.id = self.path[-1]
-
-    def get(self):
-        return BizSnapshot(self._db._store.get(self.path), self.id)
-
-    def set(self, data):
-        self._db._store[self.path] = dict(data)
+def seed_user(db_session, email="owner@example.com"):
+    user = User(
+        email=email,
+        username="Owner",
+        role="user",
+        status="Active",
+        password_hash=generate_password_hash("password123"),
+    )
+    db_session.add(user)
+    db_session.commit()
+    return user
 
 
-class BizCollection:
-    def __init__(self, db, path):
-        self._db = db
-        self.path = tuple(path)
-
-    def document(self, doc_id):
-        return BizRef(self._db, self.path + (doc_id,))
-
-    def where(self, *args, **kwargs):
-        if kwargs.get("filter") is not None:
-            field, op, value = (
-                kwargs["filter"].field_path,
-                kwargs["filter"].op_string,
-                kwargs["filter"].value,
-            )
-        else:
-            field, op, value = args[:3]
-        found = []
-        for path, data in self._db._store.items():
-            if len(path) == len(self.path) + 1 and path[: len(self.path)] == self.path:
-                if op == "==" and data.get(field) == value:
-                    found.append(BizSnapshot(data, path[-1]))
-        return BizQuery(found)
-
-
-class BizDb:
-    def __init__(self):
-        self._store = {}
-
-    def collection(self, name):
-        return BizCollection(self, (name,))
-
-
-@pytest.fixture
-def fake_db(monkeypatch):
-    import routes.business_api as business_api
-
-    db = BizDb()
-    monkeypatch.setattr(business_api, "db", db)
-    return db
-
-
-def seed(db, biz_id, data):
-    db.collection("businesses").document(biz_id).set(data)
+def seed_business(db_session, owner_id, name="One", **overrides):
+    fields = dict(owner_id=owner_id, name=name)
+    fields.update(overrides)
+    business = Business(**fields)
+    db_session.add(business)
+    db_session.commit()
+    return business
 
 
 def test_business_api_blueprint_registered(flask_app):
@@ -102,24 +60,26 @@ def test_list_unauthenticated_401(client):
     assert resp.get_json() == {"success": False, "error": "Authentication required"}
 
 
-def test_list_returns_only_callers_businesses(fake_db, client):
-    seed(fake_db, "b1", {"owner_id": "u1", "name": "One", "created_at": "t1"})
-    seed(fake_db, "b2", {"owner_id": "u2", "name": "Two", "created_at": "t2"})
+def test_list_returns_only_callers_businesses(db_session, client):
+    owner = seed_user(db_session, email="u1@example.com")
+    other = seed_user(db_session, email="u2@example.com")
+    uid = str(owner.id)
+    mine = seed_business(db_session, owner_id=uid, name="One")
+    seed_business(db_session, owner_id=str(other.id), name="Two")
     with client.session_transaction() as sess:
-        sess["user_id"] = "u1"
+        sess["user_id"] = uid
 
     resp = client.get("/api/business")
     assert resp.status_code == 200
     body = resp.get_json()
     assert body["success"] is True
-    assert body["businesses"] == [
-        {"id": "b1", "owner_id": "u1", "name": "One", "created_at": "t1"}
-    ]
+    assert body["businesses"] == [business_to_dict(mine)]
 
 
-def test_list_empty(fake_db, client):
+def test_list_empty(db_session, client):
+    owner = seed_user(db_session)
     with client.session_transaction() as sess:
-        sess["user_id"] = "u1"
+        sess["user_id"] = str(owner.id)
 
     resp = client.get("/api/business")
     assert resp.status_code == 200
@@ -127,26 +87,30 @@ def test_list_empty(fake_db, client):
 
 
 def test_get_unauthenticated_401(client):
-    resp = client.get("/api/business/b1")
+    resp = client.get(f"/api/business/{ABSENT_UUID}")
     assert resp.status_code == 401
     assert resp.get_json() == {"success": False, "error": "Authentication required"}
 
 
-def test_get_not_found_404(fake_db, client):
+def test_get_not_found_404(db_session, client):
+    owner = seed_user(db_session)
     with client.session_transaction() as sess:
-        sess["user_id"] = "u1"
+        sess["user_id"] = str(owner.id)
 
+    # A non-UUID id resolves to None (not a 500) and returns the same 404.
     resp = client.get("/api/business/missing")
     assert resp.status_code == 404
     assert resp.get_json() == {"success": False, "error": "Business not found"}
 
 
-def test_get_non_owner_403(fake_db, client):
-    seed(fake_db, "b1", {"owner_id": "u2", "name": "Two"})
+def test_get_non_owner_403(db_session, client):
+    owner = seed_user(db_session, email="u2@example.com")
+    caller = seed_user(db_session, email="u1@example.com")
+    business = seed_business(db_session, owner_id=str(owner.id), name="Two")
     with client.session_transaction() as sess:
-        sess["user_id"] = "u1"
+        sess["user_id"] = str(caller.id)
 
-    resp = client.get("/api/business/b1")
+    resp = client.get(f"/api/business/{business.id}")
     assert resp.status_code == 403
     assert resp.get_json() == {
         "success": False,
@@ -154,27 +118,34 @@ def test_get_non_owner_403(fake_db, client):
     }
 
 
-def test_get_owner_200(fake_db, client):
-    data = {
-        "owner_id": "u1",
-        "name": "One",
-        "website_url": "https://example.com",
-        "industry": "retail",
-        "description": "desc",
-        "created_at": "t1",
-        "updated_at": "t1",
-    }
-    seed(fake_db, "b1", data)
+def test_get_owner_200(db_session, client):
+    owner = seed_user(db_session)
+    uid = str(owner.id)
+    business = seed_business(
+        db_session,
+        owner_id=uid,
+        name="One",
+        website_url="https://example.com",
+        industry="retail",
+        description="desc",
+    )
     with client.session_transaction() as sess:
-        sess["user_id"] = "u1"
+        sess["user_id"] = uid
 
-    resp = client.get("/api/business/b1")
+    resp = client.get(f"/api/business/{business.id}")
     assert resp.status_code == 200
-    assert resp.get_json() == {"success": True, "business": {"id": "b1", **data}}
+    body = resp.get_json()
+    assert body["success"] is True
+    assert body["business"] == business_to_dict(business)
+    # id serialized as a string; owner_id still present in the body.
+    assert body["business"]["id"] == str(business.id)
+    uuid.UUID(body["business"]["id"])
+    assert body["business"]["owner_id"] == uid
 
 
-def test_guard_order_unauthenticated_beats_404(fake_db, client):
-    seed(fake_db, "b1", {"owner_id": "u1", "name": "One"})
+def test_guard_order_unauthenticated_beats_404(db_session, client):
+    owner = seed_user(db_session)
+    business = seed_business(db_session, owner_id=str(owner.id), name="One")
 
-    resp = client.get("/api/business/b1")
+    resp = client.get(f"/api/business/{business.id}")
     assert resp.status_code == 401  # no session → 401, NOT 404 or 403

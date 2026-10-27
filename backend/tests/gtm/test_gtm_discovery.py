@@ -1,7 +1,9 @@
 """
 Unit tests for services.gtm_discovery_service.
 """
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
 import pytest
 
 from services.gtm_discovery_service import (
@@ -64,32 +66,35 @@ def test_get_gtm_seed_queries_uses_gsc_when_connected():
     assert "gtm audit platform" in queries
 
 
-def test_get_gtm_seed_queries_fallback_to_business_doc_when_no_gsc():
-    mock_doc = MagicMock()
-    mock_doc.exists = True
-    mock_doc.to_dict.return_value = {
-        "owner_id": "user-1",
-        "industry": "Marketing Automation",
-        "keywords": ["lead qualification", "inbound marketing"],
-        "name": "BlomAI",
-    }
+def test_get_gtm_seed_queries_fallback_to_business_row_when_no_gsc():
+    # Slice c: the fallback reads the Postgres business row (industry/name). The
+    # legacy Firestore `keywords` field never existed on the business record and
+    # is no longer consulted, so the fallback queries derive from industry + name.
+    business = SimpleNamespace(
+        owner_id="user-1",
+        industry="Marketing Automation",
+        name="BlomAI",
+        website_url="https://blomai.com",
+        description="",
+    )
 
     with patch("services.gtm_discovery_service.get_connection", return_value=None), \
-         patch("services.gtm_discovery_service.db.collection") as mock_db:
-        mock_db.return_value.document.return_value.get.return_value = mock_doc
+         patch("services.gtm_discovery_service.get_business_row", return_value=business):
         queries = get_gtm_seed_queries(business_id="biz-1", user_id="user-1")
 
     assert len(queries) >= 2
-    assert any("lead qualification" in q for q in queries)
+    assert any("Marketing Automation" in q for q in queries)
+    assert any("BlomAI" in q for q in queries)
 
 
 def test_discover_competitors_end_to_end_orchestration():
-    mock_doc = MagicMock()
-    mock_doc.exists = True
-    mock_doc.to_dict.return_value = {
-        "owner_id": "user-1",
-        "website_url": "https://mysite.com",
-    }
+    business = SimpleNamespace(
+        owner_id="user-1",
+        website_url="https://mysite.com",
+        industry="Software",
+        name="MySite",
+        description="",
+    )
 
     search_return = [
         {"link": "https://mysite.com/features"},
@@ -99,11 +104,9 @@ def test_discover_competitors_end_to_end_orchestration():
         {"link": "https://competitor-three.com/"},
     ]
 
-    with patch("services.gtm_discovery_service.db.collection") as mock_db, \
+    with patch("services.gtm_discovery_service.get_business_row", return_value=business), \
          patch("services.gtm_discovery_service.get_gtm_seed_queries", return_value=["ai seo platform"]), \
          patch("services.gtm_discovery_service.search_organic_competitors", return_value=search_return):
-        mock_db.return_value.document.return_value.get.return_value = mock_doc
-
         competitors = discover_competitors("biz-1", "user-1", max_competitors=2)
 
     assert len(competitors) == 2
@@ -122,12 +125,15 @@ def test_discover_competitors_raises_if_business_missing():
 
 
 def test_discover_competitors_raises_if_unauthorized():
-    mock_doc = MagicMock()
-    mock_doc.exists = True
-    mock_doc.to_dict.return_value = {"owner_id": "different-user"}
+    business = SimpleNamespace(
+        owner_id="different-user",
+        website_url="https://example.com",
+        industry="Software",
+        name="Example",
+        description="",
+    )
 
-    with patch("services.gtm_discovery_service.db.collection") as mock_db:
-        mock_db.return_value.document.return_value.get.return_value = mock_doc
+    with patch("services.gtm_discovery_service.get_business_row", return_value=business):
         with pytest.raises(PermissionError, match="do not have permission"):
             discover_competitors("biz-1", "user-1")
 
@@ -163,13 +169,16 @@ def test_search_organic_competitors_handles_network_error():
 
 
 def test_get_gtm_seed_queries_handles_gsc_exception():
-    mock_doc = MagicMock()
-    mock_doc.exists = True
-    mock_doc.to_dict.return_value = {"industry": "FinTech"}
+    business = SimpleNamespace(
+        owner_id="user-1",
+        industry="FinTech",
+        name="",
+        website_url="",
+        description="",
+    )
 
     with patch("services.gtm_discovery_service.get_connection", side_effect=Exception("DB down")), \
-         patch("services.gtm_discovery_service.db.collection") as mock_db:
-        mock_db.return_value.document.return_value.get.return_value = mock_doc
+         patch("services.gtm_discovery_service.get_business_row", return_value=business):
         queries = get_gtm_seed_queries("biz-1", "user-1")
 
     assert any("FinTech" in q for q in queries)

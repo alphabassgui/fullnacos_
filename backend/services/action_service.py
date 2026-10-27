@@ -2,6 +2,8 @@ from datetime import datetime
 from google.cloud.firestore_v1.base_query import FieldFilter
 from firebase import db
 
+from models import get_business_row
+
 
 def create_action(
     business_id,
@@ -40,19 +42,20 @@ def create_action(
             f"{sorted(missing_fields)}"
         )
 
-    business_ref = db.collection("businesses").document(business_id)
-    business_doc = business_ref.get()
+    # Parent business lives in Postgres now; the opportunities/actions
+    # subcollections stay on Firestore keyed by the id string (business_ref).
+    business = get_business_row(business_id)
 
-    if not business_doc.exists:
+    if business is None:
         raise ValueError("Business not found")
 
-    business = business_doc.to_dict()
-
-    if business.get("owner_id") != owner_id:
+    if str(business.owner_id) != owner_id:
         raise ValueError(
             "Owner does not have access to this business"
         )
-        
+
+    business_ref = db.collection("businesses").document(business_id)
+
     opportunity_ref = (
         business_ref
         .collection("opportunities")

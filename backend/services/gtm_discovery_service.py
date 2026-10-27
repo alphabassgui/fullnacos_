@@ -18,6 +18,7 @@ from bs4 import BeautifulSoup
 from firebase import db
 from connectors.google_search_console import GoogleSearchConsoleAPI
 from services.connection_service import get_connection
+from models import get_business_row
 
 logger = logging.getLogger(__name__)
 
@@ -157,25 +158,17 @@ def get_gtm_seed_queries(business_id: str, user_id: str) -> list[str]:
             exc,
         )
 
-    # 2. Fallback to Firestore business document
-    business_ref = db.collection("businesses").document(business_id)
-    doc = business_ref.get()
-    if not doc.exists:
+    # 2. Fallback to the business row (Postgres now). The business record only
+    # ever carried name/website_url/industry/description, so the legacy
+    # target_keywords/keywords lookup was always empty and is dropped here.
+    business = get_business_row(business_id)
+    if business is None:
         return ["growth marketing platform", "saas landing page optimization"]
 
-    data = doc.to_dict() or {}
     queries: list[str] = []
 
-    # Direct keywords
-    for key in ("target_keywords", "keywords"):
-        kws = data.get(key)
-        if isinstance(kws, list):
-            for kw in kws:
-                if isinstance(kw, str) and kw.strip():
-                    queries.append(kw.strip())
-
-    industry = data.get("industry") or ""
-    name = data.get("name") or ""
+    industry = business.industry or ""
+    name = business.name or ""
 
     if industry:
         queries.append(f"{industry.strip()} software")
@@ -238,16 +231,15 @@ def discover_competitors(
     run that needs the queries for both discovery and the vision prompt computes
     them once and threads them through). When omitted, they are computed here.
     """
-    business_ref = db.collection("businesses").document(business_id)
-    doc = business_ref.get()
-    if not doc.exists:
+    # Parent business lives in Postgres now; GTM children stay on Firestore by id.
+    business = get_business_row(business_id)
+    if business is None:
         raise ValueError("Business not found")
 
-    data = doc.to_dict() or {}
-    if data.get("owner_id") != user_id:
+    if str(business.owner_id) != user_id:
         raise PermissionError("You do not have permission to access this business")
 
-    user_website = data.get("website_url") or ""
+    user_website = business.website_url or ""
     user_domain = _extract_clean_domain(user_website)
 
     if seed_queries is None:
