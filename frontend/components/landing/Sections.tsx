@@ -41,7 +41,12 @@ export function Hero() {
           <ButtonGroup className="gv-hero-cta-1" href="/signup">
             Start free
           </ButtonGroup>
-          <ButtonContainer className="gv-hero-cta-2">Watch the 90-second demo</ButtonContainer>
+          <ButtonContainer
+            className="gv-hero-cta-2"
+            onClick={() => window.open("https://drive.google.com/file/d/1K1TjHdDpferWS7QomWcaq1uvjYMZHoqK/view?usp=drivesdk", "_blank", "noopener,noreferrer")}
+          >
+            Watch the 90-second demo
+          </ButtonContainer>
         </div>
       </div>
       <HeroVisual />
@@ -306,8 +311,8 @@ export function Footer() {
           ))}
         </div>
         <div style={{ display: "flex", gap: 20 }}>
-          <Navlink>Terms</Navlink>
-          <Navlink>Privacy</Navlink>
+          <Navlink href="/terms">Terms</Navlink>
+          <Navlink href="/privacy">Privacy</Navlink>
         </div>
       </div>
     </footer>

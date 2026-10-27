@@ -91,7 +91,7 @@ const PR_TIERS: Tier[] = [
     saves: { NGN: "Save ₦216,000 a year", USD: "Save $360 a year" },
     perDay: { monthly: "≈ ₦3,000 a day", annual: "≈ ₦2,400 a day" },
     cta: "Talk to us",
-    ctaHref: "/signup",
+    ctaHref: "mailto:joshua.nicholas@student.aul.edu.ng",
     features: ["Everything in Growth", "Unlimited campaigns", "Multiple websites", "Team seats", "Dedicated success manager"],
     bold: "Unlimited campaigns",
   },
