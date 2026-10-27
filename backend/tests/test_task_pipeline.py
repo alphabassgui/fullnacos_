@@ -32,7 +32,12 @@ class _Ref:
         self.children = {}
 
     def get(self):
-        return _Snapshot(self._set_data, self.id)
+        # Reflect update()s (not just set()) so reads see the merged state, as
+        # real Firestore does — the re-dispatch guard reads analysis_task_id,
+        # which is written via update().
+        if self._set_data is None and not self.updates:
+            return _Snapshot(None, self.id)
+        return _Snapshot(self.data, self.id)
 
     @property
     def data(self):
@@ -401,3 +406,82 @@ def test_empty_opportunities_completes_run_with_no_docs(task_env):
     assert run_ref.data["status"] == "awaiting_approval"
     assert run_ref.data["opportunity_ids"] == []
     assert not biz_ref.collection("opportunities").docs
+
+
+def test_observation_not_duplicated_on_rerun(task_env, monkeypatch):
+    """acks_late redelivery: running analyze_business_website twice with the same
+    run_id must leave exactly ONE observation doc (deterministic id overwrites)."""
+    task_mod, db = task_env
+    import agent.opportunity_generator as generator_mod
+
+    monkeypatch.setattr(
+        generator_mod, "generate_opportunities",
+        lambda analysis: [dict(VALID_OPPORTUNITY)],
+    )
+
+    first = task_mod.analyze_business_website.run("b1", "u1", "r1")
+    second = task_mod.analyze_business_website.run("b1", "u1", "r1")
+
+    biz_ref = db.collection("businesses").document("b1")
+    obs_docs = biz_ref.collection("observations").docs
+    assert len(obs_docs) == 1
+    # Deterministic id == run_id, and the result envelope stays correct.
+    assert "r1" in obs_docs
+    assert first["observation_id"] == "r1"
+    assert second["observation_id"] == "r1"
+
+
+def test_opportunities_not_duplicated_on_rerun(task_env, monkeypatch):
+    """A second delivery of analyze_business_website must not create duplicate
+    opportunities — the create_opportunity type+problem dedupe guard holds."""
+    task_mod, db = task_env
+    import agent.opportunity_generator as generator_mod
+
+    monkeypatch.setattr(
+        generator_mod, "generate_opportunities",
+        lambda analysis: [
+            dict(VALID_OPPORTUNITY, title="Add SEO", type="seo"),
+            dict(VALID_OPPORTUNITY, title="Use Instagram", type="social"),
+        ],
+    )
+
+    task_mod.analyze_business_website.run("b1", "u1", "r1")
+    task_mod.analyze_business_website.run("b1", "u1", "r1")
+
+    biz_ref = db.collection("businesses").document("b1")
+    opp_docs = biz_ref.collection("opportunities").docs
+    assert len(opp_docs) == 2  # not 4
+
+
+def test_run_agent_cycle_skips_second_dispatch(task_env, monkeypatch):
+    """acks_late redelivery of run_agent_cycle must NOT enqueue a second analysis
+    child once the run already carries an analysis_task_id."""
+    task_mod, db = task_env
+
+    calls = []
+
+    class _FakeAsyncResult:
+        def __init__(self, task_id):
+            self.id = task_id
+
+    def fake_delay(**kwargs):
+        calls.append(kwargs)
+        return _FakeAsyncResult("analysis-task-123")
+
+    monkeypatch.setattr(task_mod.analyze_business_website, "delay", fake_delay)
+
+    biz_ref = db.collection("businesses").document("b1")
+    run_ref = biz_ref.collection("agent_runs").document("r1")
+
+    first = task_mod.run_agent_cycle.run("b1", "u1", "r1")
+    assert first["success"] is True
+    assert first["analysis_task_id"] == "analysis-task-123"
+    assert first.get("already_dispatched") is not True
+    assert len(calls) == 1
+    assert run_ref.data["analysis_task_id"] == "analysis-task-123"
+
+    second = task_mod.run_agent_cycle.run("b1", "u1", "r1")
+    assert second["already_dispatched"] is True
+    assert second["analysis_task_id"] == "analysis-task-123"
+    # No second child enqueued.
+    assert len(calls) == 1
