@@ -4,7 +4,21 @@ import uuid
 import pytest
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from models import Business, SecurityLog, User, UserSession
+from models import (
+    Action,
+    AgentRun,
+    Business,
+    Connection,
+    Execution,
+    GtmRun,
+    Learning,
+    Measurement,
+    Observation,
+    Opportunity,
+    SecurityLog,
+    User,
+    UserSession,
+)
 
 # A syntactically valid UUID that is never seeded — used for the "unknown user"
 # paths, where a non-UUID string would fail to bind and surface as a 500.
@@ -176,15 +190,50 @@ def seed_session(db_session, user_id, token, device_id=None):
 
 
 def seed_business(db_session, owner_id, name="Ada's Bakery", **overrides):
-    """Insert a Postgres business row (slice c). Returns the Business; the
-    str()'d id is the Firestore subcollection key for the children that stay on
-    Firestore."""
+    """Insert a Postgres business row (slice c)."""
     fields = dict(owner_id=owner_id, name=name)
     fields.update(overrides)
     business = Business(**fields)
     db_session.add(business)
     db_session.commit()
     return business
+
+
+def seed_agent_run(db_session, business_id, owner_id, **overrides):
+    fields = dict(business_id=business_id, owner_id=owner_id, type="website_analysis", status="queued")
+    fields.update(overrides)
+    run = AgentRun(**fields)
+    db_session.add(run)
+    db_session.commit()
+    return run
+
+
+def seed_opportunity(db_session, business_id, owner_id, **overrides):
+    fields = dict(
+        business_id=business_id,
+        owner_id=owner_id,
+        title="Add SEO",
+        description="d",
+        problem="p",
+        evidence=["e"],
+        potential_impact="high",
+        confidence=0.9,
+        type="seo",
+    )
+    fields.update(overrides)
+    opp = Opportunity(**fields)
+    db_session.add(opp)
+    db_session.commit()
+    return opp
+
+
+def seed_action(db_session, business_id, owner_id, **overrides):
+    fields = dict(business_id=business_id, owner_id=owner_id, action_type="social", status="approved")
+    fields.update(overrides)
+    act = Action(**fields)
+    db_session.add(act)
+    db_session.commit()
+    return act
 
 
 def post_json(client, path, body, ip):
@@ -742,8 +791,8 @@ def account_db(monkeypatch):
 def _seed_account(db_session, fs_db, email="alice@example.com"):
     """Seed the full footprint of one account: the Postgres user + business row
     (the delete enumerates business ids from Postgres now) plus a security_logs
-    row (cascade targets), and the Firestore subcollections + student_profile
-    that stay on Firestore this slice — keyed by the business UUID string.
+    row (cascade targets), and the Firestore student_profile that still requires
+    explicit cleanup.
 
     Returns (uid, bid) where bid == str(business.id)."""
     user = seed_user(db_session, email=email)
@@ -753,12 +802,6 @@ def _seed_account(db_session, fs_db, email="alice@example.com"):
     bid = str(business.id)
     db_session.commit()
 
-    biz = ("businesses", bid)
-    fs_db._store[biz + ("opportunities", "opp1")] = {"owner_id": uid}
-    fs_db._store[biz + ("opportunities", "opp2")] = {"owner_id": uid}
-    fs_db._store[biz + ("actions", "act1")] = {"owner_id": uid}
-    fs_db._store[biz + ("connections", "con1")] = {"owner_id": uid, "provider": "github"}
-    fs_db._store[biz + ("gtm_runs", "gtm1")] = {"owner_id": uid}
     fs_db._store[("student_profiles", uid)] = {"bio": "hi"}
     return uid, bid
 
@@ -777,8 +820,8 @@ def _security_log_rows(db_session, uid):
 
 
 def test_delete_account_hard_deletes_everything(account_db, db_session, client):
-    # Required case: deletion removes the Postgres user + its cascade AND still
-    # triggers the Firestore recursive_delete business cascade.
+    # Required case: deletion removes the Postgres user + its cascade via FK ON
+    # DELETE CASCADE, and explicitly deletes the Firestore student_profile.
     fs_db, auth_api = account_db
     uid, bid = _seed_account(db_session, fs_db, "alice@example.com")
     _login(client, uid)
@@ -788,8 +831,7 @@ def test_delete_account_hard_deletes_everything(account_db, db_session, client):
     assert resp.status_code == 200
     assert resp.get_json() == {"success": True, "message": "Account deleted"}
 
-    # Firestore: business + every subcollection doc + student_profile gone.
-    assert [p for p in fs_db._store if p[:2] == ("businesses", bid)] == []
+    # Firestore: student_profile explicitly deleted.
     assert ("student_profiles", uid) not in fs_db._store
     # Postgres: user + its security_logs (and any sessions) gone via FK cascade.
     assert _user_rows(db_session, uid) == 0
@@ -807,8 +849,7 @@ def test_delete_account_isolates_other_users(account_db, db_session, client):
     resp = client.delete("/api/auth/account", json={"confirm_email": "alice@example.com"})
     assert resp.status_code == 200
 
-    # Everything belonging to u2 is untouched (both stores).
-    assert ("businesses", bid2, "opportunities", "opp1") in fs_db._store
+    # Everything belonging to u2 is untouched.
     assert ("student_profiles", uid2) in fs_db._store
     assert _user_rows(db_session, uid2) == 1
     assert _security_log_rows(db_session, uid2) == 1
@@ -855,7 +896,6 @@ def test_delete_account_best_effort_failures_still_delete(account_db, db_session
     assert resp.status_code == 200
     assert resp.get_json()["success"] is True
     assert _user_rows(db_session, uid) == 0
-    assert [p for p in fs_db._store if p[:2] == ("businesses", bid)] == []
     assert _security_log_rows(db_session, uid) == 0
 
 
@@ -914,3 +954,125 @@ def test_delete_account_route_registered(flask_app):
     )
     assert rule is not None
     assert "DELETE" in rule.methods
+
+
+# ──────────────────────────────────────────────
+# Multi-level Postgres cascade tests (slice f)
+# ──────────────────────────────────────────────
+
+def _seed_connection(db_session, business_id):
+    conn = Connection(
+        business_id=business_id,
+        provider="github",
+        status="connected",
+        access_token="dummy-ciphertext",
+    )
+    db_session.add(conn)
+    db_session.commit()
+    return conn
+
+
+def _seed_gtm_run(db_session, business_id, owner_id):
+    run = GtmRun(business_id=business_id, owner_id=owner_id, status="queued")
+    db_session.add(run)
+    db_session.commit()
+    return run
+
+
+def _seed_observation(db_session, business_id, run_id, owner_id):
+    obs = Observation(run_id=run_id, business_id=business_id, owner_id=owner_id)
+    db_session.add(obs)
+    db_session.commit()
+    return obs
+
+
+def _seed_execution(db_session, business_id, owner_id):
+    exc = Execution(business_id=business_id, owner_id=owner_id, status="queued")
+    db_session.add(exc)
+    db_session.commit()
+    return exc
+
+
+def _seed_measurement(db_session, business_id, execution_id):
+    meas = Measurement(business_id=business_id, execution_id=execution_id, metric="clicks", value=1)
+    db_session.add(meas)
+    db_session.commit()
+    return meas
+
+
+def _seed_learning(db_session, business_id, execution_id):
+    lrn = Learning(business_id=business_id, execution_id=execution_id, learning_type="outcome")
+    db_session.add(lrn)
+    db_session.commit()
+    return lrn
+
+
+def test_delete_account_cascades_full_postgres_tree(account_db, db_session, client):
+    """Account delete removes ALL Postgres rows at every level via FK CASCADE:
+    user → businesses → {connections, gtm_runs, agent_runs→observations,
+    opportunities→actions, executions→{measurements,learnings}}.
+    A second user's full tree is completely untouched."""
+    fs_db, auth_api = account_db
+
+    # ── User 1: full multi-level tree ──
+    u1 = seed_user(db_session, email="u1cascade@example.com")
+    uid1 = str(u1.id)
+    biz1 = seed_business(db_session, owner_id=uid1)
+    bid1 = str(biz1.id)
+
+    conn1 = _seed_connection(db_session, bid1)
+    gtm1 = _seed_gtm_run(db_session, bid1, uid1)
+    run1 = seed_agent_run(db_session, bid1, uid1)
+    obs1 = _seed_observation(db_session, bid1, run1.id, uid1)
+    opp1 = seed_opportunity(db_session, bid1, uid1)
+    act1 = seed_action(db_session, bid1, uid1, opportunity_id=opp1.id)
+    exc1 = _seed_execution(db_session, bid1, uid1)
+    meas1 = _seed_measurement(db_session, bid1, exc1.id)
+    lrn1 = _seed_learning(db_session, bid1, exc1.id)
+
+    # Save IDs before the delete — expire_all() + reload after cascade-delete raises.
+    conn1_id = conn1.id
+    gtm1_id = gtm1.id
+    run1_id = run1.id
+    opp1_id = opp1.id
+    act1_id = act1.id
+    exc1_id = exc1.id
+    meas1_id = meas1.id
+    lrn1_id = lrn1.id
+
+    fs_db._store[("student_profiles", uid1)] = {"bio": "hi"}
+
+    # ── User 2: isolation check ──
+    u2 = seed_user(db_session, email="u2cascade@example.com")
+    uid2 = str(u2.id)
+    biz2 = seed_business(db_session, owner_id=uid2)
+    bid2 = str(biz2.id)
+    conn2 = _seed_connection(db_session, bid2)
+    conn2_id = conn2.id
+    fs_db._store[("student_profiles", uid2)] = {"bio": "there"}
+
+    _login(client, uid1)
+    resp = client.delete("/api/auth/account", json={"confirm_email": "u1cascade@example.com"})
+    assert resp.status_code == 200
+
+    db_session.expire_all()
+
+    # User 1: all Postgres rows gone at every level
+    assert db_session.get(User, uid1) is None
+    assert db_session.get(Business, bid1) is None
+    assert db_session.get(Connection, conn1_id) is None
+    assert db_session.get(GtmRun, gtm1_id) is None
+    assert db_session.get(AgentRun, run1_id) is None
+    assert db_session.get(Observation, run1_id) is None  # run_id is PK
+    assert db_session.get(Opportunity, opp1_id) is None
+    assert db_session.get(Action, act1_id) is None
+    assert db_session.get(Execution, exc1_id) is None
+    assert db_session.get(Measurement, meas1_id) is None
+    assert db_session.get(Learning, lrn1_id) is None
+    assert ("student_profiles", uid1) not in fs_db._store
+
+    # User 2: completely untouched
+    assert db_session.get(User, uid2) is not None
+    assert db_session.get(Business, bid2) is not None
+    assert db_session.get(Connection, conn2_id) is not None
+    assert ("student_profiles", uid2) in fs_db._store

@@ -1,11 +1,22 @@
-import itertools
 import uuid
 from datetime import datetime
 
 import pytest
 from werkzeug.security import generate_password_hash
 
-from models import Action, AgentRun, Business, Execution, Opportunity, User
+from models import (
+    Action,
+    AgentRun,
+    Business,
+    Connection,
+    Execution,
+    GtmRun,
+    Learning,
+    Measurement,
+    Observation,
+    Opportunity,
+    User,
+)
 
 # A syntactically valid UUID that is never seeded — the "unknown business" path
 # (a non-UUID id also resolves to None, but a real UUID proves the Postgres miss).
@@ -400,65 +411,14 @@ def test_create_missing_name_400(db_session, client):
 
 
 # ─────────────────────────────────────────────────────────────
-# delete_business (DELETE /api/business/<id>): deletes the Postgres row (its
-# Postgres children cascade via ON DELETE CASCADE), then recursively deletes the
-# remaining Firestore children (connections, gtm_runs) addressed by the same
-# UUID string. The Firestore fake below backs only that recursive_delete.
+# delete_business (DELETE /api/business/<id>): deletes the Postgres business row;
+# FK ON DELETE CASCADE removes all pipeline children (agent_runs, observations,
+# opportunities, actions, executions, measurements, learnings, gtm_runs,
+# connections). No Firestore interaction.
 # ─────────────────────────────────────────────────────────────
 
 
-class CrudRef:
-    def __init__(self, db, path):
-        self._db = db
-        self.path = tuple(path)
-        self.id = self.path[-1]
-
-    def collection(self, name):
-        return CrudCollection(self._db, self.path + (name,))
-
-
-class CrudCollection:
-    def __init__(self, db, path):
-        self._db = db
-        self.path = tuple(path)
-
-    def document(self, doc_id=None):
-        if doc_id is None:
-            doc_id = f"auto-{next(self._db._ids)}"
-        return CrudRef(self._db, self.path + (doc_id,))
-
-
-class CrudDb:
-    def __init__(self):
-        self._store = {}
-        self._ids = itertools.count(1)
-
-    def collection(self, name):
-        return CrudCollection(self, (name,))
-
-    def recursive_delete(self, ref):
-        prefix = tuple(ref.path)
-        for path in [p for p in self._store if p[: len(prefix)] == prefix]:
-            del self._store[path]
-
-
-@pytest.fixture
-def crud_db(monkeypatch):
-    import routes.user as routes_user
-
-    db = CrudDb()
-    monkeypatch.setattr(routes_user, "db", db)
-    return db
-
-
-def _seed_firestore_children(fs, bid, owner):
-    # Only the children still living in Firestore this slice (connections,
-    # gtm_runs). opportunities/actions/etc. are Postgres rows now.
-    fs._store[("businesses", bid, "connections", "con1")] = {"owner_id": owner}
-    fs._store[("businesses", bid, "gtm_runs", "gtm1")] = {"owner_id": owner}
-
-
-def test_delete_cascades_subcollections(db_session, crud_db, client):
+def test_delete_cascades_subcollections(db_session, client):
     user = seed_user(db_session)
     uid = str(user.id)
     business = seed_business(db_session, owner_id=uid, website_url="https://acme.example")
@@ -467,59 +427,117 @@ def test_delete_cascades_subcollections(db_session, crud_db, client):
     opp = seed_opportunity(db_session, bid, uid)
     seed_action(db_session, bid, uid)
     seed_agent_run(db_session, bid, uid)
-    # Firestore children that recursive_delete must still reap.
-    _seed_firestore_children(crud_db, bid, uid)
     _login(client, uid)
 
     resp = client.delete(f"/api/business/{bid}")
     assert resp.status_code == 200
     assert resp.get_json()["success"] is True
 
-    # Postgres row gone AND its Postgres children cascaded.
+    # Postgres row gone AND its children cascaded via FK ON DELETE CASCADE.
     assert db_session.get(Business, bid) is None
     assert db_session.query(Opportunity).filter_by(business_id=bid).count() == 0
     assert db_session.query(Action).filter_by(business_id=bid).count() == 0
     assert db_session.query(AgentRun).filter_by(business_id=bid).count() == 0
-    # Firestore connections/gtm_runs recursively deleted.
-    remaining = [p for p in crud_db._store if p[:2] == ("businesses", bid)]
-    assert remaining == []
 
 
-def test_delete_non_owner_403_nothing_deleted(db_session, crud_db, client):
+def test_delete_non_owner_403_nothing_deleted(db_session, client):
     owner = seed_user(db_session, email="u2@example.com")
     caller = seed_user(db_session, email="u1@example.com")
     business = seed_business(db_session, owner_id=str(owner.id), website_url="https://acme.example")
     bid = str(business.id)
-    _seed_firestore_children(crud_db, bid, str(owner.id))
-    before = dict(crud_db._store)
     _login(client, str(caller.id))
 
     resp = client.delete(f"/api/business/{bid}")
     assert resp.status_code == 403
-    assert crud_db._store == before
     assert db_session.get(Business, bid) is not None
 
 
-def test_delete_missing_business_404(db_session, crud_db, client):
+def test_delete_missing_business_404(db_session, client):
     user = seed_user(db_session)
     _login(client, str(user.id))
     resp = client.delete(f"/api/business/{ABSENT_UUID}")
     assert resp.status_code == 404
 
 
-def test_delete_unauthenticated_401(db_session, crud_db, client):
+def test_delete_unauthenticated_401(db_session, client):
     user = seed_user(db_session)
     uid = str(user.id)
     business = seed_business(db_session, owner_id=uid, website_url="https://acme.example")
     bid = str(business.id)
-    _seed_firestore_children(crud_db, bid, uid)
-    before = dict(crud_db._store)
     with client.session_transaction() as sess:
         sess.clear()
     resp = client.delete(f"/api/business/{bid}")
     assert resp.status_code == 401
-    assert crud_db._store == before
     assert db_session.get(Business, bid) is not None
+
+
+def test_delete_business_cascades_full_postgres_tree(db_session, client):
+    """Deleting one business removes ALL Postgres descendants at every level via
+    FK ON DELETE CASCADE; a second business under the same owner is untouched."""
+    owner = seed_user(db_session)
+    uid = str(owner.id)
+
+    # Business 1: full multi-level tree
+    biz1 = seed_business(db_session, owner_id=uid, website_url="https://b1.example")
+    bid1 = str(biz1.id)
+
+    conn1 = Connection(business_id=bid1, provider="github", status="connected", access_token="dummy")
+    db_session.add(conn1)
+    gtm1 = GtmRun(business_id=bid1, owner_id=uid, status="queued")
+    db_session.add(gtm1)
+    run1 = seed_agent_run(db_session, bid1, uid)
+    obs1 = Observation(run_id=run1.id, business_id=bid1, owner_id=uid)
+    db_session.add(obs1)
+    opp1 = seed_opportunity(db_session, bid1, uid)
+    act1 = seed_action(db_session, bid1, uid, opportunity_id=opp1.id)
+    exc1 = Execution(business_id=bid1, owner_id=uid, status="queued")
+    db_session.add(exc1)
+    db_session.commit()
+    meas1 = Measurement(business_id=bid1, execution_id=exc1.id, metric="clicks", value=1)
+    db_session.add(meas1)
+    lrn1 = Learning(business_id=bid1, execution_id=exc1.id, learning_type="outcome")
+    db_session.add(lrn1)
+    db_session.commit()
+
+    # Save IDs before the delete — expire_all() + reload after cascade-delete raises.
+    conn1_id = conn1.id
+    gtm1_id = gtm1.id
+    run1_id = run1.id
+    opp1_id = opp1.id
+    act1_id = act1.id
+    exc1_id = exc1.id
+    meas1_id = meas1.id
+    lrn1_id = lrn1.id
+
+    # Business 2: isolation check (same owner)
+    biz2 = seed_business(db_session, owner_id=uid, website_url="https://b2.example")
+    bid2 = str(biz2.id)
+    conn2 = Connection(business_id=bid2, provider="github", status="connected", access_token="dummy2")
+    db_session.add(conn2)
+    db_session.commit()
+    conn2_id = conn2.id
+
+    _login(client, uid)
+    resp = client.delete(f"/api/business/{bid1}")
+    assert resp.status_code == 200
+
+    db_session.expire_all()
+
+    # Business 1 and all descendants gone
+    assert db_session.get(Business, bid1) is None
+    assert db_session.get(Connection, conn1_id) is None
+    assert db_session.get(GtmRun, gtm1_id) is None
+    assert db_session.get(AgentRun, run1_id) is None
+    assert db_session.get(Observation, run1_id) is None  # run_id is PK
+    assert db_session.get(Opportunity, opp1_id) is None
+    assert db_session.get(Action, act1_id) is None
+    assert db_session.get(Execution, exc1_id) is None
+    assert db_session.get(Measurement, meas1_id) is None
+    assert db_session.get(Learning, lrn1_id) is None
+
+    # Business 2 and its children untouched
+    assert db_session.get(Business, bid2) is not None
+    assert db_session.get(Connection, conn2_id) is not None
 
 
 # ─────────────────────────────────────────────────────────────
