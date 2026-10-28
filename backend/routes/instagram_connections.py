@@ -1,6 +1,7 @@
 from urllib.parse import urlencode
 
 import secrets
+import uuid as _uuid
 import requests
 from flask import (
     Blueprint,
@@ -17,8 +18,8 @@ from config.instagram import (
     INSTAGRAM_OAUTH_TOKEN_URL,
     validate_instagram_config,
 )
-from firebase import db
-from models import get_business_row
+from extensions import db as orm_db
+from models import Connection, get_business_row
 from services.connection_service import (
     create_connection,
 )
@@ -268,51 +269,33 @@ def instagram_connection_status():
             "error": "You do not have permission to view this business",
         }), 403
 
-    # connections subcollection stays on Firestore keyed by the id string.
-    business_ref = (
-        db.collection("businesses")
-        .document(business_id)
-    )
-
-    connections = (
-        business_ref
-        .collection("connections")
-        .where("provider", "==", "instagram")
-        .where("status", "==", "connected")
+    row = (
+        orm_db.session.query(Connection)
+        .filter_by(
+            business_id=_uuid.UUID(str(business_id)),
+            provider="instagram",
+            status="connected",
+        )
+        .order_by(Connection.updated_at.desc())
         .limit(1)
-        .stream()
+        .first()
     )
 
-    connection_doc = next(
-        connections,
-        None,
-    )
-
-    if not connection_doc:
+    if not row:
         return jsonify({
             "success": True,
             "connected": False,
             "connection": None,
         }), 200
 
-    connection = connection_doc.to_dict()
-
     return jsonify({
         "success": True,
         "connected": True,
         "connection": {
-            "id": connection_doc.id,
-            "provider": connection.get(
-                "provider"
-            ),
-            "username": connection.get(
-                "username"
-            ),
-            "account_id": connection.get(
-                "account_id"
-            ),
-            "status": connection.get(
-                "status"
-            ),
+            "id": str(row.id),
+            "provider": row.provider,
+            "username": row.username,
+            "account_id": row.account_id,
+            "status": row.status,
         },
     }), 200

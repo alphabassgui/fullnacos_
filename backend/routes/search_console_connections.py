@@ -1,11 +1,12 @@
 import os
+import uuid as _uuid
 from datetime import datetime, timezone
 from flask import Blueprint, jsonify, redirect, request, session, current_app
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from services.connection_service import create_connection
 
-from firebase import db
-from models import get_business_row
+from extensions import db as orm_db
+from models import Connection, get_business_row
 from connectors.google_search_console import GoogleSearchConsoleAPI
 
 # Where to send the browser back to after the OAuth callback.
@@ -291,17 +292,16 @@ def select_search_console_property():
                 "error": "This property is not accessible to the connected Google account",
             }), 403
 
-        connection_ref = (
-            db.collection("businesses")
-            .document(business_id)
-            .collection("connections")
-            .document(connection["id"])
+        orm_db.session.query(Connection).filter(
+            Connection.id == _uuid.UUID(connection["id"])
+        ).update(
+            {
+                "site_id": site_url,
+                "updated_at": datetime.now(timezone.utc),
+            },
+            synchronize_session=False,
         )
-
-        connection_ref.update({
-            "site_id": site_url,
-            "updated_at": datetime.now(timezone.utc),
-        })
+        orm_db.session.commit()
 
         return jsonify({
             "success": True,

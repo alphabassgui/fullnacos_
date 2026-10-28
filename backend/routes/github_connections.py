@@ -1,11 +1,12 @@
 import os
 import secrets
-from firebase import db
+import uuid as _uuid
 from flask import Blueprint, jsonify, redirect, request, session
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from services.connection_service import create_github_connection
 from connectors.github_api import GitHubAPI
-from models import get_business_row
+from extensions import db as orm_db
+from models import Connection, get_business_row
 
 # Where to send the browser back to after the OAuth callback.
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
@@ -229,17 +230,16 @@ def select_github_repository():
                 ),
             }), 403
 
-        connection_ref = (
-            db.collection("businesses")
-            .document(business_id)
-            .collection("connections")
-            .document(connection["id"])
+        orm_db.session.query(Connection).filter(
+            Connection.id == _uuid.UUID(connection["id"])
+        ).update(
+            {
+                "repository": github_repo["full_name"],
+                "default_branch": github_repo["default_branch"],
+            },
+            synchronize_session=False,
         )
-
-        connection_ref.update({
-            "repository": github_repo["full_name"],
-            "default_branch": github_repo["default_branch"],
-        })
+        orm_db.session.commit()
 
         return jsonify({
             "success": True,
