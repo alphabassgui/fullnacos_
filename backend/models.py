@@ -458,6 +458,43 @@ class Learning(db.Model):
     )
 
 
+class GtmRun(db.Model):
+    """PR d-gtm: the `gtm_runs` pipeline child. One row per Visual GTM analysis
+    run. The id was a Firestore auto-id; it is now a DB-generated UUID. The user
+    is stored as `owner_id` (d-core convention) but serialized as `"user_id"` to
+    preserve the byte-identical Firestore response contract."""
+
+    __tablename__ = "gtm_runs"
+
+    id = db.Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    business_id = db.Column(
+        UUID(as_uuid=True),
+        db.ForeignKey("businesses.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    owner_id = db.Column(UUID(as_uuid=True))
+    website_url = db.Column(db.Text)
+    status = db.Column(db.Text)
+    celery_task_id = db.Column(db.Text)
+    gtm_scores = db.Column(JSONB)
+    blind_spots = db.Column(JSONB)
+    competitors_analyzed = db.Column(JSONB)
+    user_manifest = db.Column(JSONB)
+    opportunities_created_count = db.Column(db.Integer)
+    dossier_path = db.Column(db.Text)
+    error = db.Column(db.Text)
+    created_at = db.Column(
+        db.DateTime(timezone=True), nullable=False, server_default=db.func.now()
+    )
+    started_at = db.Column(db.DateTime(timezone=True))
+    completed_at = db.Column(db.DateTime(timezone=True))
+
+
 def _iso(value):
     """Serialize a timestamp column to the same naive-UTC ISO string the
     Firestore-era routes returned (datetime.utcnow().isoformat(), no tz offset).
@@ -688,3 +725,29 @@ def learning_to_dict(row):
         "confidence": _float(row.confidence),
         "created_at": _iso(row.created_at),
     }
+
+
+def gtm_run_to_dict(row):
+    """Serialize a GtmRun row to the same JSON shape the Firestore-era routes
+    returned. Fixed keys match the initial Firestore doc fields (always present);
+    lifecycle keys are omitted when NULL via _put (matching sparse Firestore docs).
+    The user is emitted as `"user_id"` (the key the Firestore doc carried)."""
+    body = {
+        "id": str(row.id),
+        "business_id": str(row.business_id),
+        "user_id": _str_id(row.owner_id),
+        "status": row.status,
+        "website_url": row.website_url,
+        "created_at": _iso(row.created_at),
+    }
+    _put(body, "celery_task_id", row.celery_task_id)
+    _put(body, "gtm_scores", row.gtm_scores)
+    _put(body, "blind_spots", row.blind_spots)
+    _put(body, "competitors_analyzed", row.competitors_analyzed)
+    _put(body, "user_manifest", row.user_manifest)
+    _put(body, "opportunities_created_count", row.opportunities_created_count)
+    _put(body, "dossier_path", row.dossier_path)
+    _put(body, "error", row.error)
+    _put(body, "started_at", _iso(row.started_at))
+    _put(body, "completed_at", _iso(row.completed_at))
+    return body

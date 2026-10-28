@@ -9,13 +9,13 @@ API Blueprint for Visual GTM Operating System:
 """
 from __future__ import annotations
 
-import os
-from datetime import datetime
+import uuid as _uuid
 from pathlib import Path
 
 from flask import Blueprint, jsonify, request, session, current_app, send_file
-from firebase import db
-from models import get_business_row
+
+from extensions import db as orm_db
+from models import GtmRun, get_business_row, gtm_run_to_dict
 
 gtm_bp = Blueprint("gtm_bp", __name__)
 
@@ -23,8 +23,8 @@ gtm_bp = Blueprint("gtm_bp", __name__)
 def _verify_business_ownership(business_id: str, user_id: str):
     """Verify that business exists and belongs to the authenticated user.
 
-    The parent business lives in Postgres now; its GTM children stay on
-    Firestore keyed by the id string. Returns (Business row, None) on success.
+    The parent business lives in Postgres; its GTM children also live in
+    Postgres now (PR d-gtm). Returns (Business row, None) on success.
     """
     business = get_business_row(business_id)
     if business is None:
@@ -51,24 +51,15 @@ def trigger_gtm_run():
     if error_resp:
         return error_resp
 
-    now = datetime.utcnow().isoformat()
-    run_ref = (
-        db.collection("businesses")
-        .document(business_id)
-        .collection("gtm_runs")
-        .document()
+    run = GtmRun(
+        business_id=business.id,
+        owner_id=user_id,
+        status="queued",
+        website_url=business.website_url,
     )
-
-    run_id = str(run_ref.id)
-    initial_run_data = {
-        "id": run_id,
-        "business_id": business_id,
-        "user_id": user_id,
-        "status": "queued",
-        "created_at": now,
-        "website_url": business.website_url,
-    }
-    run_ref.set(initial_run_data)
+    orm_db.session.add(run)
+    orm_db.session.commit()
+    run_id = str(run.id)
 
     try:
         from task import run_gtm_analysis
@@ -77,7 +68,8 @@ def trigger_gtm_run():
             user_id=user_id,
             run_id=run_id,
         )
-        run_ref.update({"celery_task_id": str(task_res.id)})
+        run.celery_task_id = str(task_res.id)
+        orm_db.session.commit()
     except Exception as exc:
         current_app.logger.warning("Could not dispatch Celery task immediately: %s", exc)
 
@@ -102,18 +94,21 @@ def list_gtm_runs():
     if error_resp:
         return error_resp
 
-    runs_ref = (
-        db.collection("businesses")
-        .document(business_id)
-        .collection("gtm_runs")
-        .order_by("created_at", direction="DESCENDING")
+    try:
+        biz_uuid = _uuid.UUID(business_id)
+    except (ValueError, TypeError):
+        return jsonify({"success": False, "error": "Business not found"}), 404
+
+    runs = (
+        orm_db.session.query(GtmRun)
+        .filter_by(business_id=biz_uuid)
+        .order_by(GtmRun.created_at.desc())
+        .all()
     )
-    docs = runs_ref.stream()
-    runs = [{"id": doc.id, **doc.to_dict()} for doc in docs]
 
     return jsonify({
         "success": True,
-        "runs": runs,
+        "runs": [gtm_run_to_dict(r) for r in runs],
     }), 200
 
 
@@ -131,19 +126,23 @@ def get_gtm_run(run_id: str):
     if error_resp:
         return error_resp
 
-    run_ref = (
-        db.collection("businesses")
-        .document(business_id)
-        .collection("gtm_runs")
-        .document(run_id)
+    try:
+        run_uuid = _uuid.UUID(run_id)
+        biz_uuid = _uuid.UUID(business_id)
+    except (ValueError, TypeError):
+        return jsonify({"success": False, "error": "GTM run not found"}), 404
+
+    run = (
+        orm_db.session.query(GtmRun)
+        .filter_by(id=run_uuid, business_id=biz_uuid)
+        .first()
     )
-    doc = run_ref.get()
-    if not doc.exists:
+    if run is None:
         return jsonify({"success": False, "error": "GTM run not found"}), 404
 
     return jsonify({
         "success": True,
-        "run": {"id": doc.id, **doc.to_dict()},
+        "run": gtm_run_to_dict(run),
     }), 200
 
 
@@ -161,22 +160,24 @@ def get_gtm_dossier(run_id: str):
     if error_resp:
         return error_resp
 
-    run_ref = (
-        db.collection("businesses")
-        .document(business_id)
-        .collection("gtm_runs")
-        .document(run_id)
-    )
-    doc = run_ref.get()
-    if not doc.exists:
+    try:
+        run_uuid = _uuid.UUID(run_id)
+        biz_uuid = _uuid.UUID(business_id)
+    except (ValueError, TypeError):
         return jsonify({"success": False, "error": "GTM run not found"}), 404
 
-    run_data = doc.to_dict() or {}
-    dossier_path = run_data.get("dossier_path")
+    run = (
+        orm_db.session.query(GtmRun)
+        .filter_by(id=run_uuid, business_id=biz_uuid)
+        .first()
+    )
+    if run is None:
+        return jsonify({"success": False, "error": "GTM run not found"}), 404
+
+    dossier_path = run.dossier_path
     if not dossier_path or not Path(dossier_path).exists():
-        # Generate inline if not yet saved to file
         from services.gtm_dossier_service import generate_gtm_dossier_markdown
-        content = generate_gtm_dossier_markdown(run_data)
+        content = generate_gtm_dossier_markdown(gtm_run_to_dict(run))
         return content, 200, {"Content-Type": "text/markdown; charset=utf-8"}
 
     return send_file(dossier_path, mimetype="text/markdown", as_attachment=False)
