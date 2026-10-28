@@ -104,7 +104,7 @@ def db_session(flask_app):
                 sa.text(
                     "TRUNCATE users, user_sessions, security_logs, "
                     "businesses, agent_runs, observations, opportunities, "
-                    "actions, executions, measurements, learnings CASCADE"
+                    "actions, executions, measurements, learnings, gtm_runs CASCADE"
                 )
             )
             db.session.commit()

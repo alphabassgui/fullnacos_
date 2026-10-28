@@ -8,11 +8,10 @@ from redis.exceptions import (
 )
 from kombu.exceptions import OperationalError as KombuOperationalError
 from firebase_admin import firestore
-from firebase import db
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from extensions import db as orm_db
-from models import AgentRun, Observation, get_business_row
+from models import AgentRun, GtmRun, Observation, get_business_row
 from website_analyzer import fetch_website_html, analyze_html
 from services.execution_engine import execute_action
 
@@ -362,18 +361,22 @@ def run_gtm_analysis(self, business_id, user_id, run_id):
     4. Vision LLM evaluation across 4 GTM pillars.
     5. Persistence of structured GTM opportunities and executive dossier.
     """
-    run_ref = (
-        db.collection("businesses")
-        .document(business_id)
-        .collection("gtm_runs")
-        .document(run_id)
-    )
+    # Resolve the GtmRun row from Postgres. A non-UUID run_id (e.g. from unit
+    # tests that pass string ids) is handled by the UUID guard below — the task
+    # soft-fails the DB lookup and continues without run tracking, matching the
+    # soft-fail pattern of analyze_business_website.
+    run = None
+    try:
+        import uuid as _uuid_mod
+        _uuid_mod.UUID(str(run_id))
+        run = orm_db.session.get(GtmRun, run_id)
+    except (ValueError, TypeError, AttributeError):
+        pass
 
-    now = datetime.utcnow().isoformat()
-    run_ref.update({
-        "status": "running",
-        "started_at": now,
-    })
+    if run is not None:
+        run.status = "running"
+        run.started_at = datetime.utcnow()
+        orm_db.session.commit()
 
     try:
         from services.pixelrag_service import render_and_tile_page
@@ -388,7 +391,7 @@ def run_gtm_analysis(self, business_id, user_id, run_id):
         )
         from services.opportunity_service import create_opportunity
 
-        # 1. Fetch business (Postgres now; children stay on Firestore by id)
+        # 1. Fetch business (Postgres; gtm_runs also in Postgres now)
         business = get_business_row(business_id)
         if business is None:
             raise ValueError("Business not found")
@@ -505,7 +508,7 @@ def run_gtm_analysis(self, business_id, user_id, run_id):
         # 6. Generate & Save Executive Dossier
         run_summary = {
             "id": run_id,
-            "created_at": now,
+            "created_at": datetime.utcnow().isoformat(),
             "user_website": {
                 "url": website_url,
                 "tiles": user_manifest.get("tiles", []),
@@ -518,18 +521,17 @@ def run_gtm_analysis(self, business_id, user_id, run_id):
         dossier_md = generate_gtm_dossier_markdown(run_summary)
         dossier_path = save_dossier_to_file(run_id, business_id, dossier_md)
 
-        # 7. Complete Run in Firestore
-        completed_at = datetime.utcnow().isoformat()
-        run_ref.update({
-            "status": "completed",
-            "completed_at": completed_at,
-            "gtm_scores": gtm_scores,
-            "blind_spots": blind_spots,
-            "competitors_analyzed": competitors,
-            "user_manifest": user_manifest,
-            "opportunities_created_count": len(created_opp_ids),
-            "dossier_path": dossier_path,
-        })
+        # 7. Complete Run in Postgres
+        if run is not None:
+            run.status = "completed"
+            run.completed_at = datetime.utcnow()
+            run.gtm_scores = gtm_scores
+            run.blind_spots = blind_spots
+            run.competitors_analyzed = competitors
+            run.user_manifest = user_manifest
+            run.opportunities_created_count = len(created_opp_ids)
+            run.dossier_path = dossier_path
+            orm_db.session.commit()
 
         return {
             "success": True,
@@ -539,9 +541,10 @@ def run_gtm_analysis(self, business_id, user_id, run_id):
         }
 
     except Exception as exc:
-        run_ref.update({
-            "status": "failed",
-            "error": str(exc),
-            "completed_at": datetime.utcnow().isoformat(),
-        })
+        if run is not None:
+            orm_db.session.rollback()
+            run.status = "failed"
+            run.error = str(exc)
+            run.completed_at = datetime.utcnow()
+            orm_db.session.commit()
         raise

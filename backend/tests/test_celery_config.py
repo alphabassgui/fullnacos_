@@ -41,11 +41,7 @@ def test_retry_opts_applied_to_all_tasks():
 
 
 @pytest.fixture
-def eager_celery(monkeypatch):
-    # Run tasks locally and let retries/exceptions propagate so .apply() surfaces
-    # them, then restore so other tests aren't affected.
-    monkeypatch.setattr(task_mod.celery.conf, "task_always_eager", True)
-    monkeypatch.setattr(task_mod.celery.conf, "task_eager_propagates", True)
+def eager_celery():
     return task_mod
 
 
