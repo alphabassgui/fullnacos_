@@ -190,15 +190,50 @@ def seed_session(db_session, user_id, token, device_id=None):
 
 
 def seed_business(db_session, owner_id, name="Ada's Bakery", **overrides):
-    """Insert a Postgres business row (slice c). Returns the Business; the
-    str()'d id is the Firestore subcollection key for the children that stay on
-    Firestore."""
+    """Insert a Postgres business row (slice c)."""
     fields = dict(owner_id=owner_id, name=name)
     fields.update(overrides)
     business = Business(**fields)
     db_session.add(business)
     db_session.commit()
     return business
+
+
+def seed_agent_run(db_session, business_id, owner_id, **overrides):
+    fields = dict(business_id=business_id, owner_id=owner_id, type="website_analysis", status="queued")
+    fields.update(overrides)
+    run = AgentRun(**fields)
+    db_session.add(run)
+    db_session.commit()
+    return run
+
+
+def seed_opportunity(db_session, business_id, owner_id, **overrides):
+    fields = dict(
+        business_id=business_id,
+        owner_id=owner_id,
+        title="Add SEO",
+        description="d",
+        problem="p",
+        evidence=["e"],
+        potential_impact="high",
+        confidence=0.9,
+        type="seo",
+    )
+    fields.update(overrides)
+    opp = Opportunity(**fields)
+    db_session.add(opp)
+    db_session.commit()
+    return opp
+
+
+def seed_action(db_session, business_id, owner_id, **overrides):
+    fields = dict(business_id=business_id, owner_id=owner_id, action_type="social", status="approved")
+    fields.update(overrides)
+    act = Action(**fields)
+    db_session.add(act)
+    db_session.commit()
+    return act
 
 
 def post_json(client, path, body, ip):
