@@ -495,6 +495,71 @@ class GtmRun(db.Model):
     completed_at = db.Column(db.DateTime(timezone=True))
 
 
+class Connection(db.Model):
+    """Slice (e): the `connections` Firestore subcollection moves to Postgres.
+    One row per OAuth connection (GitHub / Google Search Console / Instagram).
+    Multiple rows per (business_id, provider) are allowed; get_connection picks
+    the most-recently-updated 'connected' row (ORDER BY updated_at DESC LIMIT 1).
+    Provider-specific columns are nullable — one wide table mirrors the Firestore
+    shape exactly."""
+
+    __tablename__ = "connections"
+
+    id = db.Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    business_id = db.Column(
+        UUID(as_uuid=True),
+        db.ForeignKey("businesses.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    provider     = db.Column(db.Text, nullable=False)
+    status       = db.Column(db.Text, nullable=False)
+    access_token = db.Column(db.Text, nullable=False)   # Fernet ciphertext
+    created_at   = db.Column(
+        db.DateTime(timezone=True), nullable=False, server_default=db.func.now()
+    )
+    updated_at   = db.Column(
+        db.DateTime(timezone=True), nullable=False, server_default=db.func.now()
+    )
+    # GitHub-only
+    account_id     = db.Column(db.Text)
+    repository     = db.Column(db.Text)
+    default_branch = db.Column(db.Text)
+    # GSC-only (token_uri / granted_scopes / properties_count written at connect
+    # time but never exposed by get_connection — stored for completeness)
+    refresh_token    = db.Column(db.Text)       # Fernet ciphertext
+    token_uri        = db.Column(db.Text)
+    granted_scopes   = db.Column(JSONB)         # list[str]
+    properties_count = db.Column(db.Integer)
+    site_id          = db.Column(db.Text)
+    token_expires_at = db.Column(db.Text)       # ISO string (not DateTime)
+    # Instagram-only
+    username   = db.Column(db.Text)
+    expires_in = db.Column(db.Integer)
+
+
+def connection_to_dict(row, *, access_token, refresh_token):
+    """Exact replica of the dict get_connection returned from Firestore.
+    Caller decrypts tokens before passing them in.  All 10 keys are always
+    present (some None), matching the pre-migration API contract."""
+    return {
+        "id":               str(row.id),
+        "provider":         row.provider,
+        "account_id":       row.account_id,
+        "username":         row.username,
+        "site_id":          row.site_id,
+        "token_expires_at": row.token_expires_at,
+        "repository":       row.repository,
+        "default_branch":   row.default_branch,
+        "access_token":     access_token,
+        "refresh_token":    refresh_token,
+    }
+
+
 def _iso(value):
     """Serialize a timestamp column to the same naive-UTC ISO string the
     Firestore-era routes returned (datetime.utcnow().isoformat(), no tz offset).

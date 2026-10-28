@@ -1,13 +1,13 @@
 import logging
 import os
+import uuid as _uuid
 from datetime import datetime
 
 import requests
 
+from extensions import db as orm_db
+from models import Connection, connection_to_dict, get_business_row
 from services.token_encryption import encrypt_token, decrypt_token
-from firebase import db
-
-from models import get_business_row
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +21,6 @@ def create_connection(
     provider,
     connection_data,
 ):
-
-    # Parent business lives in Postgres now; the connections subcollection
-    # stays on Firestore keyed by the id string (business_ref below).
     business = get_business_row(business_id)
 
     if business is None:
@@ -34,13 +31,6 @@ def create_connection(
             "You do not have permission to modify this business"
         )
 
-    business_ref = (
-        db.collection("businesses")
-        .document(business_id)
-    )
-
-    now = datetime.utcnow().isoformat()
-
     for token_field in ("access_token", "refresh_token"):
         if connection_data.get(token_field):
             connection_data = {
@@ -50,28 +40,44 @@ def create_connection(
                 ),
             }
 
-    connection = {
-        "provider": provider,
-        "status": "connected",
-        "created_at": now,
-        "updated_at": now,
-        **connection_data,
-    }
-
-    connection_ref = (
-        business_ref
-        .collection("connections")
-        .document()
+    row = Connection(
+        business_id=_uuid.UUID(str(business_id)),
+        provider=provider,
+        status="connected",
+        access_token=connection_data.get("access_token"),
+        refresh_token=connection_data.get("refresh_token"),
+        account_id=connection_data.get("account_id"),
+        repository=connection_data.get("repository"),
+        default_branch=connection_data.get("default_branch"),
+        token_uri=connection_data.get("token_uri"),
+        token_expires_at=connection_data.get("token_expires_at"),
+        granted_scopes=connection_data.get("granted_scopes"),
+        properties_count=connection_data.get("properties_count"),
+        site_id=connection_data.get("site_id"),
+        username=connection_data.get("username"),
+        expires_in=connection_data.get("expires_in"),
     )
+    orm_db.session.add(row)
+    orm_db.session.flush()
+    orm_db.session.commit()
 
-    connection_ref.set(connection)
+    # Return shape matches the Firestore-era dict (id + provider + status +
+    # timestamps + connection_data with encrypted tokens).
+    created_at = row.created_at
+    updated_at = row.updated_at
+    if created_at is not None and getattr(created_at, "tzinfo", None) is not None:
+        created_at = created_at.replace(tzinfo=None)
+    if updated_at is not None and getattr(updated_at, "tzinfo", None) is not None:
+        updated_at = updated_at.replace(tzinfo=None)
 
     return {
-        "id": connection_ref.id,
-        **connection,
+        "id": str(row.id),
+        "provider": provider,
+        "status": "connected",
+        "created_at": created_at.isoformat() if created_at else None,
+        "updated_at": updated_at.isoformat() if updated_at else None,
+        **connection_data,
     }
-    
-
 
 
 def get_connection(
@@ -85,9 +91,6 @@ def get_connection(
     The access token is decrypted internally and returned
     only to backend code that explicitly needs it.
     """
-
-    # Parent business lives in Postgres now; the connections subcollection
-    # stays on Firestore keyed by the id string (business_ref below).
     business = get_business_row(business_id)
 
     if business is None:
@@ -98,103 +101,47 @@ def get_connection(
             "You do not have permission to access this business"
         )
 
-    business_ref = (
-        db.collection("businesses")
-        .document(business_id)
-    )
-
-    connections = (
-        business_ref
-        .collection("connections")
-        .where(
-            "provider",
-            "==",
-            provider,
+    row = (
+        orm_db.session.query(Connection)
+        .filter_by(
+            business_id=_uuid.UUID(str(business_id)),
+            provider=provider,
+            status="connected",
         )
-        .where(
-            "status",
-            "==",
-            "connected",
-        )
-        .order_by(
-            "updated_at",
-            direction="DESCENDING",
-        )
+        .order_by(Connection.updated_at.desc())
         .limit(1)
-        .stream()
+        .first()
     )
 
-    connection_doc = next(
-        connections,
-        None,
-    )
-
-    if not connection_doc:
+    if row is None:
         return None
-            
-        
 
-    connection = connection_doc.to_dict()
-
-    encrypted_token = connection.get(
-        "access_token"
-    )
-
-    if not encrypted_token:
+    if not row.access_token:
         raise ValueError(
             "Connection does not contain an access token"
         )
 
-    access_token = decrypt_token(
-        encrypted_token
-    )
-
-    return {
-        "id": connection_doc.id,
-        "provider": connection.get(
-            "provider"
-        ),
-        "account_id": connection.get(
-            "account_id"
-        ),
-        "username": connection.get(
-            "username"
-        ),
-        "site_id": connection.get(
-            "site_id"
-        ),
-        "token_expires_at": connection.get(
-            "token_expires_at"
-        ),
-        "repository": connection.get(
-            "repository"
-        ),
-        "default_branch": connection.get(
-            "default_branch"
-        ),
-        "access_token": access_token,
-        "refresh_token": (
-            decrypt_token(connection["refresh_token"])
-            if connection.get("refresh_token")
+    return connection_to_dict(
+        row,
+        access_token=decrypt_token(row.access_token),
+        refresh_token=(
+            decrypt_token(row.refresh_token)
+            if row.refresh_token
             else None
         ),
-    }
-    
+    )
+
+
 def delete_connection(
     business_id,
     user_id,
     provider,
 ):
     """
-    Hard-delete the stored connection(s) for a provider on a business.
+    Hard-delete all stored 'connected' connections for a provider on a business.
 
-    Removes every matching "connected" connection doc from Firestore so no
-    stale connection survives. Returns the number of docs deleted (an int);
-    0 means nothing was connected.
+    Returns the number of rows deleted (an int); 0 means nothing was connected.
     """
-
-    # Parent business lives in Postgres now; the connections subcollection
-    # stays on Firestore keyed by the id string (business_ref below).
     business = get_business_row(business_id)
 
     if business is None:
@@ -205,37 +152,16 @@ def delete_connection(
             "You do not have permission to modify this business"
         )
 
-    business_ref = (
-        db.collection("businesses")
-        .document(business_id)
-    )
-
-    connections = (
-        business_ref
-        .collection("connections")
-        .where(
-            "provider",
-            "==",
-            provider,
+    deleted = (
+        orm_db.session.query(Connection)
+        .filter_by(
+            business_id=_uuid.UUID(str(business_id)),
+            provider=provider,
+            status="connected",
         )
-        .where(
-            "status",
-            "==",
-            "connected",
-        )
-        .stream()
+        .delete(synchronize_session=False)
     )
-
-    deleted = 0
-
-    for connection_doc in connections:
-        # Provider-side OAuth token revocation is handled separately by the
-        # best-effort revoke_github_token / revoke_google_token helpers below
-        # (called from the account-deletion flow). Here we only remove the
-        # stored Firestore connection doc.
-        connection_doc.reference.delete()
-        deleted += 1
-
+    orm_db.session.commit()
     return deleted
 
 
@@ -277,7 +203,7 @@ def revoke_github_token(access_token):
 
     This is strictly best-effort: a missing env var or token, or any failure,
     returns False and is logged. It NEVER raises — account deletion must still
-    remove the stored Firestore data even when the provider call fails.
+    remove the stored connection data even when the provider call fails.
 
     Returns True only when the provider confirmed revocation (2xx).
     """
