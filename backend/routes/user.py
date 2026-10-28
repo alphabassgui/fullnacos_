@@ -1,6 +1,5 @@
 from flask import Blueprint, render_template, request, redirect, url_for, flash, session, current_app, jsonify
 from firebase_admin import auth as admin_auth
-from firebase import db
 from google.cloud.firestore_v1.base_query import FieldFilter
 from sqlalchemy.exc import IntegrityError
 from task import analyze_business_website
@@ -337,26 +336,14 @@ def delete_business(business_id):
             "error": "You do not have permission to delete this business"
         }), 403
 
-    # ─────────────────────────────────────────────────────────
-    # Transitional delete (children still on Firestore this slice)
-    #
-    # Delete the Postgres business row (its pipeline children — agent_runs,
-    # observations, opportunities, actions, executions, measurements, learnings
-    # — reap via ON DELETE CASCADE), then recursively delete the Firestore
-    # children still living there this slice (connections, gtm_runs), addressed
-    # by the SAME business id string. Firestore does NOT delete subcollections
-    # when a parent doc is removed, so recursive_delete is still required for
-    # those. Full single-store cascade is a later slice.
-    # ─────────────────────────────────────────────────────────
-
+    # FK ON DELETE CASCADE removes all pipeline children (agent_runs,
+    # observations, opportunities, actions, executions, measurements, learnings,
+    # gtm_runs, connections) when the business row is deleted.
     orm_db.session.delete(business)
     orm_db.session.commit()
 
-    db.recursive_delete(db.collection("businesses").document(business_id))
-
-    # TODO: Supabase tile blobs for this business's gtm_runs are stored
-    # outside Firestore and are NOT removed by this cascade — that belongs
-    # to the #5 account-deletion phase.
+    # TODO: Supabase tile blobs for this business are stored outside Postgres
+    # and are NOT removed by FK cascade — that belongs to the account-deletion path.
 
     return jsonify({
         "success": True,

@@ -15,10 +15,9 @@ from models import Business, User
 
 api_auth_bp = Blueprint("api_auth", __name__)
 
-# Providers whose OAuth tokens we revoke provider-side during account deletion,
-# mapped to the connection_service helper that revokes each. Revocation is
-# strictly best-effort; the stored (encrypted) Firestore docs are removed by the
-# per-business recursive_delete regardless.
+# Providers whose OAuth tokens we revoke provider-side during account deletion.
+# Revocation is strictly best-effort; connection rows are removed by FK ON DELETE
+# CASCADE when the user row is deleted.
 _OAUTH_PROVIDERS = ("github", "google_search_console")
 
 
@@ -264,8 +263,8 @@ def _revoke_business_tokens(business_id, user_id):
     For each connected provider, fetch the decrypted token(s) and ask the
     provider to revoke them. Every step is wrapped so a failure (a provider
     outage, a missing/foreign connection, a helper raising) can NEVER abort the
-    account deletion — the stored Firestore connection docs are removed by the
-    caller's recursive_delete regardless of what happens here."""
+    account deletion — connection rows are removed by FK ON DELETE CASCADE
+    regardless of what happens here."""
     for provider in _OAUTH_PROVIDERS:
         try:
             conn = connection_service.get_connection(business_id, user_id, provider)
@@ -290,13 +289,14 @@ def _revoke_business_tokens(business_id, user_id):
 def api_delete_account():
     """Permanently and irreversibly delete the signed-in user's account.
 
-    HARD delete: the user doc, every business they own (plus all nested
-    subcollections, via recursive_delete), their student_profiles doc, and all
-    of their security_logs entries are removed. Additionally, GitHub and Google
-    Search Console OAuth tokens are revoked provider-side and the business's
-    Supabase tile blobs are cleaned up — both strictly best-effort, so neither a
-    provider outage nor a storage hiccup can block the deletion or change the
-    200 response. The Firebase Auth record is removed last, also best-effort.
+    HARD delete: the user row and every business they own are removed from
+    Postgres; FK ON DELETE CASCADE propagates to all pipeline children
+    (agent_runs, observations, opportunities, actions, executions,
+    measurements, learnings, gtm_runs, connections). The student_profiles
+    Firestore doc is deleted explicitly. GitHub and Google Search Console OAuth
+    tokens are revoked provider-side and the business's Supabase tile blobs are
+    cleaned up — both strictly best-effort, so neither a provider outage nor a
+    storage hiccup can block the deletion or change the 200 response.
 
     Because deletion is irreversible, it requires a server-side confirmation:
     the caller must send their own account email in ``confirm_email`` and this
@@ -323,16 +323,16 @@ def api_delete_account():
                 "error": "Email confirmation does not match",
             }), 400
 
-        # ── Enumerate the user's businesses up front (Postgres now; the id,
-        #    str()'d, is still the Firestore subcollection path segment for the
-        #    children that stay on Firestore this slice) ──
+        # ── Enumerate the user's businesses up front so we can run per-business
+        #    best-effort cleanup before the user row (and its cascades) are gone. ──
         business_ids = [
             str(business.id)
             for business in Business.query.filter_by(owner_id=user_id).all()
         ]
 
-        # ── Per business: best-effort provider revocation + tile cleanup,
-        #    then a recursive delete of the business and all subcollections ──
+        # ── Per business: best-effort provider revocation + tile cleanup.
+        #    FK ON DELETE CASCADE removes all child rows when the user row is
+        #    deleted below — no Firestore recursive_delete needed. ──
         for business_id in business_ids:
             _revoke_business_tokens(business_id, user_id)
             try:
@@ -341,7 +341,6 @@ def api_delete_account():
                 current_app.logger.warning(
                     f"Tile cleanup skipped for business {business_id}: {exc}"
                 )
-            db.recursive_delete(db.collection("businesses").document(business_id))
 
         # ── Per-user student profile (stays on Firestore this slice) ──
         profile_ref = db.collection("student_profiles").document(user_id)
