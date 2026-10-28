@@ -499,12 +499,23 @@ def test_delete_business_cascades_full_postgres_tree(db_session, client):
     db_session.add(lrn1)
     db_session.commit()
 
+    # Save IDs before the delete — expire_all() + reload after cascade-delete raises.
+    conn1_id = conn1.id
+    gtm1_id = gtm1.id
+    run1_id = run1.id
+    opp1_id = opp1.id
+    act1_id = act1.id
+    exc1_id = exc1.id
+    meas1_id = meas1.id
+    lrn1_id = lrn1.id
+
     # Business 2: isolation check (same owner)
     biz2 = seed_business(db_session, owner_id=uid, website_url="https://b2.example")
     bid2 = str(biz2.id)
     conn2 = Connection(business_id=bid2, provider="github", status="connected", access_token="dummy2")
     db_session.add(conn2)
     db_session.commit()
+    conn2_id = conn2.id
 
     _login(client, uid)
     resp = client.delete(f"/api/business/{bid1}")
@@ -514,19 +525,19 @@ def test_delete_business_cascades_full_postgres_tree(db_session, client):
 
     # Business 1 and all descendants gone
     assert db_session.get(Business, bid1) is None
-    assert db_session.get(Connection, conn1.id) is None
-    assert db_session.get(GtmRun, gtm1.id) is None
-    assert db_session.get(AgentRun, run1.id) is None
-    assert db_session.get(Observation, run1.id) is None  # run_id is PK
-    assert db_session.get(Opportunity, opp1.id) is None
-    assert db_session.get(Action, act1.id) is None
-    assert db_session.get(Execution, exc1.id) is None
-    assert db_session.get(Measurement, meas1.id) is None
-    assert db_session.get(Learning, lrn1.id) is None
+    assert db_session.get(Connection, conn1_id) is None
+    assert db_session.get(GtmRun, gtm1_id) is None
+    assert db_session.get(AgentRun, run1_id) is None
+    assert db_session.get(Observation, run1_id) is None  # run_id is PK
+    assert db_session.get(Opportunity, opp1_id) is None
+    assert db_session.get(Action, act1_id) is None
+    assert db_session.get(Execution, exc1_id) is None
+    assert db_session.get(Measurement, meas1_id) is None
+    assert db_session.get(Learning, lrn1_id) is None
 
     # Business 2 and its children untouched
     assert db_session.get(Business, bid2) is not None
-    assert db_session.get(Connection, conn2.id) is not None
+    assert db_session.get(Connection, conn2_id) is not None
 
 
 # ─────────────────────────────────────────────────────────────

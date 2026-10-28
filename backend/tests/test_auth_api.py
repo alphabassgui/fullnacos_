@@ -1030,6 +1030,16 @@ def test_delete_account_cascades_full_postgres_tree(account_db, db_session, clie
     meas1 = _seed_measurement(db_session, bid1, exc1.id)
     lrn1 = _seed_learning(db_session, bid1, exc1.id)
 
+    # Save IDs before the delete — expire_all() + reload after cascade-delete raises.
+    conn1_id = conn1.id
+    gtm1_id = gtm1.id
+    run1_id = run1.id
+    opp1_id = opp1.id
+    act1_id = act1.id
+    exc1_id = exc1.id
+    meas1_id = meas1.id
+    lrn1_id = lrn1.id
+
     fs_db._store[("student_profiles", uid1)] = {"bio": "hi"}
 
     # ── User 2: isolation check ──
@@ -1038,6 +1048,7 @@ def test_delete_account_cascades_full_postgres_tree(account_db, db_session, clie
     biz2 = seed_business(db_session, owner_id=uid2)
     bid2 = str(biz2.id)
     conn2 = _seed_connection(db_session, bid2)
+    conn2_id = conn2.id
     fs_db._store[("student_profiles", uid2)] = {"bio": "there"}
 
     _login(client, uid1)
@@ -1049,19 +1060,19 @@ def test_delete_account_cascades_full_postgres_tree(account_db, db_session, clie
     # User 1: all Postgres rows gone at every level
     assert db_session.get(User, uid1) is None
     assert db_session.get(Business, bid1) is None
-    assert db_session.get(Connection, conn1.id) is None
-    assert db_session.get(GtmRun, gtm1.id) is None
-    assert db_session.get(AgentRun, run1.id) is None
-    assert db_session.get(Observation, run1.id) is None  # run_id is PK
-    assert db_session.get(Opportunity, opp1.id) is None
-    assert db_session.get(Action, act1.id) is None
-    assert db_session.get(Execution, exc1.id) is None
-    assert db_session.get(Measurement, meas1.id) is None
-    assert db_session.get(Learning, lrn1.id) is None
+    assert db_session.get(Connection, conn1_id) is None
+    assert db_session.get(GtmRun, gtm1_id) is None
+    assert db_session.get(AgentRun, run1_id) is None
+    assert db_session.get(Observation, run1_id) is None  # run_id is PK
+    assert db_session.get(Opportunity, opp1_id) is None
+    assert db_session.get(Action, act1_id) is None
+    assert db_session.get(Execution, exc1_id) is None
+    assert db_session.get(Measurement, meas1_id) is None
+    assert db_session.get(Learning, lrn1_id) is None
     assert ("student_profiles", uid1) not in fs_db._store
 
     # User 2: completely untouched
     assert db_session.get(User, uid2) is not None
     assert db_session.get(Business, bid2) is not None
-    assert db_session.get(Connection, conn2.id) is not None
+    assert db_session.get(Connection, conn2_id) is not None
     assert ("student_profiles", uid2) in fs_db._store
