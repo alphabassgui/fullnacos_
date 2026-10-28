@@ -225,6 +225,13 @@ def test_delete_connection_removes_all_connected_rows_returns_count(db_session):
         access_token_plaintext="other-token",
     )
 
+    # Save IDs before deletion: delete_connection uses synchronize_session=False,
+    # so the identity map isn't updated and accessing .id on the objects after
+    # commit raises ObjectDeletedError.
+    c1_id = c1.id
+    c2_id = c2.id
+    c3_id = c3.id
+
     count = delete_connection(
         business_id=str(biz.id),
         user_id=str(user.id),
@@ -232,10 +239,11 @@ def test_delete_connection_removes_all_connected_rows_returns_count(db_session):
     )
 
     assert count == 2
-    assert db_session.get(Connection, c1.id) is None
-    assert db_session.get(Connection, c2.id) is None
+    db_session.expire_all()
+    assert db_session.get(Connection, c1_id) is None
+    assert db_session.get(Connection, c2_id) is None
     # Non-connected row is untouched
-    surviving = db_session.get(Connection, c3.id)
+    surviving = db_session.get(Connection, c3_id)
     assert surviving is not None
     assert surviving.status == "disconnected"
 
