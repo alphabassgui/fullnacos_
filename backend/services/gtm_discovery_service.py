@@ -15,7 +15,6 @@ from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
-from firebase import db
 from connectors.google_search_console import GoogleSearchConsoleAPI
 from services.connection_service import get_connection
 from models import get_business_row

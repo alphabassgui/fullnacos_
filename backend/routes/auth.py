@@ -2,7 +2,6 @@ import hmac
 import logging
 import secrets
 from flask import Blueprint, render_template, request, redirect, url_for, flash, session, current_app
-from firebase import db
 from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -336,13 +335,7 @@ def login():
         #     return redirect(url_for("payment.payment_page"))
         #
         # flash("A subscription is required to continue.", "warning")
-        # student_profiles stays on Firestore this slice; route by its presence.
-        profile = db.collection("student_profiles").document(user_id).get()
-
-        if profile.exists:
-            return redirect(url_for("user.dashboard"))
-        else:
-            return redirect(url_for("user.create_profile"))
+        return redirect(url_for("user.business"))
 
     token = generate_login_token()
     return render_template("login.html", login_token=token)

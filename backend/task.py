@@ -7,7 +7,6 @@ from redis.exceptions import (
     TimeoutError as RedisTimeoutError,
 )
 from kombu.exceptions import OperationalError as KombuOperationalError
-from firebase_admin import firestore
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from extensions import db as orm_db

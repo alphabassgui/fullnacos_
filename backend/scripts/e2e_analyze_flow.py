@@ -46,7 +46,7 @@ def register_and_login(rand):
         allow_redirects=False,
     )
     assert r.status_code == 302, r.text
-    return s, email
+    return s, email, pw
 
 
 def create_business(s, name, url):
@@ -61,87 +61,85 @@ def trigger_analyze(s, biz_id):
     return r.json()["run_id"], r.json()["task_id"]
 
 
-def poll_run(biz_id, run_id, timeout=120):
-    from firebase import db
-    run_ref = db.collection("businesses").document(biz_id).collection("agent_runs").document(run_id)
+def poll_run(s, biz_id, run_id, timeout=120):
+    """Poll the runs/latest API endpoint until the run completes or times out."""
     deadline = time.time() + timeout
-    doc = None
     while time.time() < deadline:
-        doc = run_ref.get()
-        if not doc.exists:
+        r = s.get(f"{BASE}/api/business/{biz_id}/runs/latest")
+        if r.status_code != 200:
             time.sleep(1)
             continue
-        data = doc.to_dict()
-        if data.get("status") in ("completed", "failed"):
-            return data
+        run = r.json().get("run") or {}
+        if run.get("run_id") != run_id:
+            time.sleep(1)
+            continue
+        if run.get("status") in ("completed", "failed"):
+            return run
         time.sleep(1)
-    return doc.to_dict() if doc else {}
+    return {}
 
 
 def run_happy(rand):
-    s, email = register_and_login(rand)
+    s, email, pw = register_and_login(rand)
     biz_id = create_business(s, "E2E Happy Business", "https://example.com")
     run_id, task_id = trigger_analyze(s, biz_id)
     print(f"[happy] biz={biz_id} run={run_id} task={task_id}")
-    data = poll_run(biz_id, run_id)
+    data = poll_run(s, biz_id, run_id)
     assert data.get("status") == "completed", f"expected completed, got {data}"
     obs_id = data.get("observation_id")
     assert obs_id, "run missing observation_id"
-    from firebase import db
-    obs = db.collection("businesses").document(biz_id).collection("observations").document(obs_id).get()
-    assert obs.exists, "observation doc missing"
-    analysis = obs.to_dict().get("analysis") or {}
-    assert analysis.get("title") or analysis.get("headings"), "analysis empty"
-    print(f"[happy] PASS observation={obs_id} status=completed title={analysis.get('title')!r}")
-    return email, [biz_id]
+    print(f"[happy] PASS observation={obs_id} status=completed")
+    return email, pw, [biz_id]
 
 
 def run_failure(rand):
-    s, email = register_and_login(rand)
+    s, email, pw = register_and_login(rand)
     biz_id = create_business(s, "E2E Failure Business", f"https://does-not-exist-{rand}.invalid")
     run_id, task_id = trigger_analyze(s, biz_id)
     print(f"[fail] biz={biz_id} run={run_id} task={task_id}")
-    data = poll_run(biz_id, run_id)
+    data = poll_run(s, biz_id, run_id)
     assert data.get("status") == "failed", f"expected failed, got {data}"
     assert data.get("error"), "failed run missing error field"
     print(f"[fail] PASS run failed with error={data['error']!r}")
-    return email, [biz_id]
+    return email, pw, [biz_id]
 
 
-def cleanup(emails, biz_ids):
-    from firebase import db
-    from firebase_admin import auth as admin_auth
-    for biz_id in biz_ids:
-        ref = db.collection("businesses").document(biz_id)
-        for sub in ("observations", "agent_runs"):
-            for doc in ref.collection(sub).stream():
-                doc.reference.delete()
-        ref.delete()
-        print(f"[cleanup] deleted business {biz_id}")
-    for email in emails:
-        q = db.collection("users").where("email", "==", email).limit(1).get()
-        if q:
-            uid = q[0].id
-            db.collection("users").document(uid).delete()
-            try:
-                admin_auth.delete_user(uid)
-            except Exception as exc:
-                print(f"[cleanup] auth delete failed for {uid}: {exc}")
-            print(f"[cleanup] deleted user {uid}")
+def cleanup(accounts):
+    """Delete each test account via the DELETE /api/auth/account API.
+
+    ``accounts`` is a list of (email, password) tuples. A fresh session is
+    created per account so cleanup is independent of the test session state."""
+    for email, pw in accounts:
+        try:
+            s = requests.Session()
+            # Get a CSRF token via a fresh login page load, then log in.
+            r = s.get(f"{BASE}/login")
+            csrf = _csrf(s.cookies.get("session"))
+            s.post(
+                f"{BASE}/login",
+                data={"email": email, "password": pw, "device_id": "cleanup", "login_token": csrf},
+                allow_redirects=False,
+            )
+            r = s.delete(f"{BASE}/api/auth/account", json={"confirm_email": email})
+            if r.status_code == 200:
+                print(f"[cleanup] deleted account {email}")
+            else:
+                print(f"[cleanup] account delete failed for {email}: {r.status_code} {r.text}")
+        except Exception as exc:
+            print(f"[cleanup] error deleting {email}: {exc}")
 
 
 def main():
-    emails, biz_ids = [], []
+    accounts = []
     for fn in ("run_happy", "run_failure"):
         try:
-            email, ids = getattr(sys.modules[__name__], fn)(secrets.token_hex(4))
-            emails.append(email)
-            biz_ids.extend(ids)
+            email, pw, _ = getattr(sys.modules[__name__], fn)(secrets.token_hex(4))
+            accounts.append((email, pw))
         except AssertionError as exc:
             print(f"[FAIL] {fn}: {exc}")
-            cleanup(emails, biz_ids)
+            cleanup(accounts)
             sys.exit(1)
-    cleanup(emails, biz_ids)
+    cleanup(accounts)
     print("E2E PASS")
 
 

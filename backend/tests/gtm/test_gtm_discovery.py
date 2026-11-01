@@ -115,11 +115,7 @@ def test_discover_competitors_end_to_end_orchestration():
 
 
 def test_discover_competitors_raises_if_business_missing():
-    mock_doc = MagicMock()
-    mock_doc.exists = False
-
-    with patch("services.gtm_discovery_service.db.collection") as mock_db:
-        mock_db.return_value.document.return_value.get.return_value = mock_doc
+    with patch("services.gtm_discovery_service.get_business_row", return_value=None):
         with pytest.raises(ValueError, match="Business not found"):
             discover_competitors("missing-biz", "user-1")
 
@@ -184,14 +180,10 @@ def test_get_gtm_seed_queries_handles_gsc_exception():
     assert any("FinTech" in q for q in queries)
 
 
-def test_get_gtm_seed_queries_empty_doc_fallback():
-    mock_doc = MagicMock()
-    mock_doc.exists = False
-
+def test_get_gtm_seed_queries_fallback_when_no_business():
     with patch("services.gtm_discovery_service.get_connection", return_value=None), \
-         patch("services.gtm_discovery_service.db.collection") as mock_db:
-        mock_db.return_value.document.return_value.get.return_value = mock_doc
-        queries = get_gtm_seed_queries("biz-1", "user-1")
+         patch("services.gtm_discovery_service.get_business_row", return_value=None):
+        queries = get_gtm_seed_queries("missing-biz", "user-1")
 
     assert len(queries) >= 1
 
