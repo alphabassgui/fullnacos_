@@ -69,28 +69,11 @@ class ContextTask(celery.Task):
     """
 
     def __call__(self, *args, **kwargs):
-        try:
-            from app import app
-        except Exception as exc:
-            import os, sys, traceback
-            logger.error("CONTEXTTASK_IMPORT_DEBUG cwd=%s", os.getcwd())
-            logger.error("CONTEXTTASK_IMPORT_DEBUG __file__=%s", __file__)
-            logger.error("CONTEXTTASK_IMPORT_DEBUG sys.path=%s", sys.path)
-            logger.error("CONTEXTTASK_IMPORT_DEBUG app in sys.modules? %s", "app" in sys.modules)
-            logger.error("CONTEXTTASK_IMPORT_DEBUG app.py exists at _HERE? %s",
-                         os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.py")))
-            # If app.py exists but import failed, import it directly to surface the REAL error:
-            try:
-                import importlib.util
-                _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.py")
-                spec = importlib.util.spec_from_file_location("app_debug", _p)
-                mod = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(mod)
-                logger.error("CONTEXTTASK_IMPORT_DEBUG direct-load of app.py SUCCEEDED (so it's a path/name issue, not an app.py error)")
-            except Exception:
-                logger.error("CONTEXTTASK_IMPORT_DEBUG direct-load of app.py RAISED the REAL error:\n%s",
-                             traceback.format_exc())
-            raise exc
+        import os, sys
+        _here = os.path.dirname(os.path.abspath(__file__))
+        if _here not in sys.path:
+            sys.path.insert(0, _here)
+        from app import app
         with app.app_context():
             return super().__call__(*args, **kwargs)
 
