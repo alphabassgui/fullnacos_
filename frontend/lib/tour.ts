@@ -140,6 +140,20 @@ export function markAutoStartedThisSession(): void {
   autoStartedThisSession = true;
 }
 
+/** Forget the browser-global tour cache + pending-sync marker, and reset the
+ *  in-session auto-start guard. Call at auth boundaries (logout / account switch)
+ *  so a new user on the same browser can see the tour. Mirrors clearOnboardingCache()
+ *  in lib/onboarding.ts. Never throws. */
+export function clearTourCache(): void {
+  try {
+    localStorage.removeItem(TOUR_SEEN_KEY);
+    localStorage.removeItem(TOUR_SYNC_PENDING_KEY);
+  } catch {
+    // no-op when storage is unavailable
+  }
+  autoStartedThisSession = false;
+}
+
 /**
  * Push "tour complete" to the backend (the source of truth) with a few bounded
  * retries. On success clears the pending marker; on exhaustion sets it so
