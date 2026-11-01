@@ -28,26 +28,11 @@ def client(flask_app):
 def auth_client(flask_app):
     c = flask_app.test_client()
     with c.session_transaction() as sess:
-        sess["user_id"] = "user-1"  # matches mock_gtm_business_doc owner_id
+        sess["user_id"] = "user-1"
     return c
 
 
 # ── GTM-Specific Shared Fixtures ────────────────────────────────────────────
-
-@pytest.fixture
-def mock_gtm_business_doc():
-    """Firestore business document fixture with owner_id and website_url."""
-    doc = MagicMock()
-    doc.exists = True
-    doc.id = "biz-1"
-    doc.to_dict.return_value = {
-        "owner_id": "user-1",
-        "website_url": "https://example.com",
-        "business_name": "Example Corp",
-        "industry": "Software",
-    }
-    return doc
-
 
 @pytest.fixture
 def gtm_business(monkeypatch):

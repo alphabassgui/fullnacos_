@@ -2,7 +2,6 @@ import secrets
 from datetime import datetime, timedelta
 
 from flask import Blueprint, current_app, jsonify, request, session
-from google.cloud.firestore_v1.base_query import FieldFilter
 from sqlalchemy.exc import IntegrityError
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -10,8 +9,7 @@ import routes.auth as auth
 import services.connection_service as connection_service
 import services.tile_storage_service as tile_storage_service
 from extensions import db as orm_db
-from firebase import db
-from models import Business, User
+from models import AgentRun, Business, User
 
 api_auth_bp = Blueprint("api_auth", __name__)
 
@@ -22,26 +20,20 @@ _OAUTH_PROVIDERS = ("github", "google_search_console")
 
 
 def _has_onboarding_evidence(user_id):
-    """Durable onboarding evidence: at least one business owned by the user that
-    has a completed analysis run (``agent_runs`` doc with
-    ``analysis_status == "completed"``). Lets already-onboarded (legacy) users be
-    recognised even when the stored flag predates this field. Bounded and
-    best-effort — any Firestore error returns False so /api/auth/me falls back to
-    the stored flag (default False)."""
+    """Durable onboarding evidence: at least one completed agent_run owned by the
+    user. Lets already-onboarded (legacy) users be recognised even when the stored
+    flag predates this field. Best-effort — any DB error returns False so
+    /api/auth/me falls back to the stored flag (default False)."""
     try:
-        businesses = Business.query.filter_by(owner_id=user_id).all()
-        for business in businesses:
-            completed = (
-                db.collection("businesses")
-                .document(str(business.id))
-                .collection("agent_runs")
-                .where(filter=FieldFilter("analysis_status", "==", "completed"))
-                .limit(1)
-                .get()
+        return (
+            orm_db.session.query(AgentRun)
+            .join(Business, AgentRun.business_id == Business.id)
+            .filter(
+                Business.owner_id == user_id,
+                AgentRun.analysis_status == "completed",
             )
-            if completed:
-                return True
-        return False
+            .first() is not None
+        )
     except Exception:
         return False
 
@@ -292,8 +284,7 @@ def api_delete_account():
     HARD delete: the user row and every business they own are removed from
     Postgres; FK ON DELETE CASCADE propagates to all pipeline children
     (agent_runs, observations, opportunities, actions, executions,
-    measurements, learnings, gtm_runs, connections). The student_profiles
-    Firestore doc is deleted explicitly. GitHub and Google Search Console OAuth
+    measurements, learnings, gtm_runs, connections). GitHub and Google Search Console OAuth
     tokens are revoked provider-side and the business's Supabase tile blobs are
     cleaned up — both strictly best-effort, so neither a provider outage nor a
     storage hiccup can block the deletion or change the 200 response.
@@ -341,11 +332,6 @@ def api_delete_account():
                 current_app.logger.warning(
                     f"Tile cleanup skipped for business {business_id}: {exc}"
                 )
-
-        # ── Per-user student profile (stays on Firestore this slice) ──
-        profile_ref = db.collection("student_profiles").document(user_id)
-        if profile_ref.get().exists:
-            profile_ref.delete()
 
         # ── Finally the user row itself — the FK ON DELETE CASCADE removes the
         #    user's user_sessions and security_logs rows. Then drop the session. ──

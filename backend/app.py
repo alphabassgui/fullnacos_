@@ -75,9 +75,8 @@ app.config.update(
 )
 
 
-# SQLAlchemy / Flask-Migrate wiring. Firestore remains the live database; this
-# only prepares the Postgres (Supabase) stack for later, table-by-table slices.
-# Guarded on DATABASE_URL so local/legacy runs without it still boot.
+# SQLAlchemy / Flask-Migrate wiring. Postgres (Supabase) is the live database.
+# Guarded on DATABASE_URL so local runs without it still boot.
 import logging
 from sqlalchemy.pool import NullPool
 from extensions import db, migrate

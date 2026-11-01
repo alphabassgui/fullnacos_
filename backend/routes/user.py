@@ -1,14 +1,8 @@
 from flask import Blueprint, render_template, request, redirect, url_for, flash, session, current_app, jsonify
-from firebase_admin import auth as admin_auth
-from google.cloud.firestore_v1.base_query import FieldFilter
 from sqlalchemy.exc import IntegrityError
 from task import analyze_business_website
 from datetime import datetime
 import uuid
-from firebase_admin import firestore
-from datetime import datetime
-from task import execute_approved_action
-from google.cloud import firestore
 from task import execute_approved_action
 from validations import validate_website_url
 from extensions import db as orm_db

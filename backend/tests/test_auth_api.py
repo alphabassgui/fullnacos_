@@ -1,4 +1,3 @@
-import itertools as _itertools
 import uuid
 
 import pytest
@@ -46,121 +45,6 @@ def clean_auth_state(monkeypatch):
     routes_auth.registration_log.clear()
 
 
-# ──────────────────────────────────────────────
-# Fake Firestore for the collections that STAY on Firestore this slice
-# (student_profiles routing, businesses/agent_runs onboarding evidence).
-# Users / sessions / security_logs now live in Postgres (the db_session fixture).
-# ──────────────────────────────────────────────
-
-
-class AuthSnapshot:
-    def __init__(self, data, doc_id):
-        self.exists = data is not None
-        self._data = dict(data) if data else {}
-        self.id = doc_id
-
-    def to_dict(self):
-        return dict(self._data)
-
-
-class AuthQuery:
-    def __init__(self, snapshots):
-        self._snapshots = list(snapshots)
-
-    def limit(self, n):
-        return AuthQuery(self._snapshots[:n])
-
-    def stream(self):
-        return iter(self._snapshots)
-
-    def get(self):
-        return list(self._snapshots)
-
-
-class AuthRef:
-    def __init__(self, db, path):
-        self._db = db
-        self.path = tuple(path)
-        self.id = self.path[-1]
-        self.updates = []
-
-    @property
-    def data(self):
-        state = dict(self._db._store.get(self.path) or {})
-        for item in self.updates:
-            state.update(item)
-        return state
-
-    def get(self):
-        return AuthSnapshot(self._db._store.get(self.path), self.id)
-
-    def collection(self, name):
-        return AuthCollection(self._db, self.path + (name,))
-
-    def set(self, data):
-        self._db._store[self.path] = dict(data)
-
-    def update(self, data):
-        self.updates.append(dict(data))
-        self._db._store[self.path] = dict(self.data)
-
-
-class AuthCollection:
-    def __init__(self, db, path):
-        self._db = db
-        self.path = tuple(path)
-
-    def document(self, doc_id=None):
-        if doc_id is None:
-            doc_id = f"auto-{len(self)}"
-        return AuthRef(self._db, self.path + (doc_id,))
-
-    def where(self, *args, **kwargs):
-        filt = kwargs.get("filter")
-        if filt is not None:
-            field, op, value = filt.field_path, filt.op_string, filt.value
-        else:
-            field, op, value = args[:3]
-        found = []
-        for path, data in self._db._store.items():
-            if len(path) == len(self.path) + 1 and path[: len(self.path)] == self.path:
-                if op == "==" and data.get(field) == value:
-                    found.append(AuthSnapshot(data, path[-1]))
-        return AuthQuery(found)
-
-    def __len__(self):
-        return sum(
-            1 for path in self._db._store
-            if len(path) == len(self.path) + 1 and path[: len(self.path)] == self.path
-        )
-
-    def stream(self):
-        return iter([
-            AuthSnapshot(data, path[-1])
-            for path, data in self._db._store.items()
-            if len(path) == len(self.path) + 1 and path[: len(self.path)] == self.path
-        ])
-
-
-class AuthDb:
-    def __init__(self):
-        self._store = {}
-
-    def collection(self, name):
-        return AuthCollection(self, (name,))
-
-
-@pytest.fixture
-def fs(monkeypatch):
-    """Patch the Firestore handle used by the routes that still read Firestore
-    (login's student_profiles lookup, /me onboarding evidence)."""
-    import routes.auth as routes_auth
-    import routes.auth_api as auth_api
-
-    db = AuthDb()
-    monkeypatch.setattr(routes_auth, "db", db)
-    monkeypatch.setattr(auth_api, "db", db)
-    return db
 
 
 # ──────────────────────────────────────────────
@@ -483,7 +367,7 @@ def test_logout_removes_only_current_token(db_session, client):
 # /me
 # ══════════════════════════════════════════════
 
-def test_me_returns_logged_in_user(db_session, fs, client):
+def test_me_returns_logged_in_user(db_session, client):
     user = seed_user(db_session)
     uid = str(user.id)
     with client.session_transaction() as sess:
@@ -515,18 +399,13 @@ def test_me_returns_onboarding_flag_true(db_session, client):
     assert resp.get_json()["user"]["has_completed_onboarding"] is True
 
 
-def test_me_derives_onboarding_from_completed_run(db_session, fs, client):
+def test_me_derives_onboarding_from_completed_run(db_session, client):
     # Stored flag False, but the user owns a business with a completed analysis
-    # run → /me derives has_completed_onboarding True (hybrid evidence path).
+    # run in Postgres → /me derives has_completed_onboarding True.
     user = seed_user(db_session)
     uid = str(user.id)
-    # Business lives in Postgres now; its agent_runs child stays on Firestore,
-    # keyed by the business UUID string.
     business = seed_business(db_session, owner_id=uid)
-    business_ref = fs.collection("businesses").document(str(business.id))
-    business_ref.collection("agent_runs").document("r1").set({
-        "owner_id": uid, "analysis_status": "completed",
-    })
+    seed_agent_run(db_session, business.id, uid, analysis_status="completed")
     with client.session_transaction() as sess:
         sess["user_id"] = uid
 
@@ -535,14 +414,11 @@ def test_me_derives_onboarding_from_completed_run(db_session, fs, client):
     assert resp.get_json()["user"]["has_completed_onboarding"] is True
 
 
-def test_me_onboarding_false_without_completed_run(db_session, fs, client):
+def test_me_onboarding_false_without_completed_run(db_session, client):
     user = seed_user(db_session)
     uid = str(user.id)
     business = seed_business(db_session, owner_id=uid)
-    business_ref = fs.collection("businesses").document(str(business.id))
-    business_ref.collection("agent_runs").document("r1").set({
-        "owner_id": uid, "analysis_status": "running",
-    })
+    seed_agent_run(db_session, business.id, uid, analysis_status="running")
     with client.session_transaction() as sess:
         sess["user_id"] = uid
 
@@ -677,122 +553,30 @@ def test_login_required_rejects_absent_token(db_session, flask_app):
 
 
 # ──────────────────────────────────────────────
-# DELETE /api/auth/account — split-store hard deletion
+# DELETE /api/auth/account — hard deletion
 #
-# The user row (+ cascade of user_sessions / security_logs) is in Postgres; the
-# businesses cascade and student_profiles stay on Firestore (the DelDb fake).
+# The user row (+ cascade of user_sessions / security_logs / all pipeline
+# children) is in Postgres. Firebase is gone; no student_profiles Firestore
+# cleanup is needed.
 # ──────────────────────────────────────────────
-
-
-class DelSnapshot:
-    def __init__(self, data, doc_id):
-        self.exists = data is not None
-        self._data = dict(data) if data else {}
-        self.id = doc_id
-
-    def to_dict(self):
-        return dict(self._data)
-
-
-class DelQuery:
-    """Supports chained .where(...).stream() with == filters."""
-
-    def __init__(self, db, parent_path, filters):
-        self._db = db
-        self._parent_path = tuple(parent_path)
-        self._filters = list(filters)
-
-    def where(self, *args, **kwargs):
-        if kwargs.get("filter") is not None:
-            f = kwargs["filter"]
-            field, op, value = f.field_path, f.op_string, f.value
-        else:
-            field, op, value = args[:3]
-        return DelQuery(self._db, self._parent_path, self._filters + [(field, op, value)])
-
-    def stream(self):
-        out = []
-        for path, data in self._db._store.items():
-            if len(path) != len(self._parent_path) + 1:
-                continue
-            if path[: len(self._parent_path)] != self._parent_path:
-                continue
-            if all(op == "==" and data.get(field) == value
-                   for field, op, value in self._filters):
-                out.append(DelSnapshot(data, path[-1]))
-        return iter(out)
-
-
-class DelRef:
-    def __init__(self, db, path):
-        self._db = db
-        self.path = tuple(path)
-        self.id = self.path[-1]
-
-    def get(self):
-        return DelSnapshot(self._db._store.get(self.path), self.id)
-
-    def set(self, data):
-        self._db._store[self.path] = dict(data)
-
-    def delete(self):
-        self._db._store.pop(self.path, None)
-
-    def collection(self, name):
-        return DelCollection(self._db, self.path + (name,))
-
-
-class DelCollection:
-    def __init__(self, db, path):
-        self._db = db
-        self.path = tuple(path)
-
-    def document(self, doc_id=None):
-        if doc_id is None:
-            doc_id = f"auto-{next(self._db._ids)}"
-        return DelRef(self._db, self.path + (doc_id,))
-
-    def where(self, *args, **kwargs):
-        return DelQuery(self._db, self.path, []).where(*args, **kwargs)
-
-    def stream(self):
-        return DelQuery(self._db, self.path, []).stream()
-
-
-class DelDb:
-    def __init__(self):
-        self._store = {}
-        self._ids = _itertools.count(1)
-
-    def collection(self, name):
-        return DelCollection(self, (name,))
-
-    def recursive_delete(self, ref):
-        prefix = tuple(ref.path)
-        for path in [p for p in self._store if p[: len(prefix)] == prefix]:
-            del self._store[path]
 
 
 @pytest.fixture
 def account_db(monkeypatch):
-    """Rich in-memory Firestore for account-deletion tests, with the best-effort
-    provider/tile helpers stubbed so tests NEVER hit real GitHub/Google/Supabase."""
+    """Stub the best-effort provider/tile helpers so tests NEVER hit real
+    GitHub/Google/Supabase."""
     import routes.auth_api as auth_api
 
-    db = DelDb()
-    monkeypatch.setattr(auth_api, "db", db)
     monkeypatch.setattr(auth_api.connection_service, "get_connection", lambda *a, **k: None)
     monkeypatch.setattr(auth_api.connection_service, "revoke_github_token", lambda *a, **k: True)
     monkeypatch.setattr(auth_api.connection_service, "revoke_google_token", lambda *a, **k: True)
     monkeypatch.setattr(auth_api.tile_storage_service, "delete_tiles_for_business", lambda *a, **k: None)
-    return db, auth_api
+    return auth_api
 
 
-def _seed_account(db_session, fs_db, email="alice@example.com"):
-    """Seed the full footprint of one account: the Postgres user + business row
-    (the delete enumerates business ids from Postgres now) plus a security_logs
-    row (cascade targets), and the Firestore student_profile that still requires
-    explicit cleanup.
+def _seed_account(db_session, email="alice@example.com"):
+    """Seed the full footprint of one account: Postgres user + business row plus
+    a security_logs row (cascade target).
 
     Returns (uid, bid) where bid == str(business.id)."""
     user = seed_user(db_session, email=email)
@@ -801,8 +585,6 @@ def _seed_account(db_session, fs_db, email="alice@example.com"):
     business = seed_business(db_session, owner_id=uid)
     bid = str(business.id)
     db_session.commit()
-
-    fs_db._store[("student_profiles", uid)] = {"bio": "hi"}
     return uid, bid
 
 
@@ -821,9 +603,8 @@ def _security_log_rows(db_session, uid):
 
 def test_delete_account_hard_deletes_everything(account_db, db_session, client):
     # Required case: deletion removes the Postgres user + its cascade via FK ON
-    # DELETE CASCADE, and explicitly deletes the Firestore student_profile.
-    fs_db, auth_api = account_db
-    uid, bid = _seed_account(db_session, fs_db, "alice@example.com")
+    # DELETE CASCADE.
+    uid, bid = _seed_account(db_session, "alice@example.com")
     _login(client, uid)
 
     # Confirmation is re-verified case-insensitively (stored email is lowercased).
@@ -831,8 +612,6 @@ def test_delete_account_hard_deletes_everything(account_db, db_session, client):
     assert resp.status_code == 200
     assert resp.get_json() == {"success": True, "message": "Account deleted"}
 
-    # Firestore: student_profile explicitly deleted.
-    assert ("student_profiles", uid) not in fs_db._store
     # Postgres: user + its security_logs (and any sessions) gone via FK cascade.
     assert _user_rows(db_session, uid) == 0
     assert _security_log_rows(db_session, uid) == 0
@@ -841,23 +620,21 @@ def test_delete_account_hard_deletes_everything(account_db, db_session, client):
 
 
 def test_delete_account_isolates_other_users(account_db, db_session, client):
-    fs_db, auth_api = account_db
-    uid1, bid1 = _seed_account(db_session, fs_db, "alice@example.com")
-    uid2, bid2 = _seed_account(db_session, fs_db, "bob@example.com")
+    uid1, bid1 = _seed_account(db_session, "alice@example.com")
+    uid2, bid2 = _seed_account(db_session, "bob@example.com")
     _login(client, uid1)
 
     resp = client.delete("/api/auth/account", json={"confirm_email": "alice@example.com"})
     assert resp.status_code == 200
 
     # Everything belonging to u2 is untouched.
-    assert ("student_profiles", uid2) in fs_db._store
     assert _user_rows(db_session, uid2) == 1
     assert _security_log_rows(db_session, uid2) == 1
 
 
 def test_delete_account_revokes_and_cleans_tiles_when_connected(account_db, db_session, client):
-    fs_db, auth_api = account_db
-    uid, bid = _seed_account(db_session, fs_db, "alice@example.com")
+    auth_api = account_db
+    uid, bid = _seed_account(db_session, "alice@example.com")
     _login(client, uid)
 
     gh_calls, goog_calls, tile_calls = [], [], []
@@ -878,8 +655,8 @@ def test_delete_account_revokes_and_cleans_tiles_when_connected(account_db, db_s
 def test_delete_account_best_effort_failures_still_delete(account_db, db_session, client):
     # Even if the revoke helpers AND the tile helper RAISE, the hard delete must
     # still complete and return 200.
-    fs_db, auth_api = account_db
-    uid, bid = _seed_account(db_session, fs_db, "alice@example.com")
+    auth_api = account_db
+    uid, bid = _seed_account(db_session, "alice@example.com")
     _login(client, uid)
 
     def boom(*a, **k):
@@ -900,34 +677,27 @@ def test_delete_account_best_effort_failures_still_delete(account_db, db_session
 
 
 def test_delete_account_wrong_email_400_nothing_deleted(account_db, db_session, client):
-    fs_db, auth_api = account_db
-    uid, bid = _seed_account(db_session, fs_db, "alice@example.com")
-    fs_before = dict(fs_db._store)
+    uid, bid = _seed_account(db_session, "alice@example.com")
     _login(client, uid)
 
     resp = client.delete("/api/auth/account", json={"confirm_email": "wrong@example.com"})
     assert resp.status_code == 400
     assert resp.get_json() == {"success": False, "error": "Email confirmation does not match"}
-    assert fs_db._store == fs_before
     assert _user_rows(db_session, uid) == 1
     assert _security_log_rows(db_session, uid) == 1
 
 
 def test_delete_account_missing_email_400_nothing_deleted(account_db, db_session, client):
-    fs_db, auth_api = account_db
-    uid, bid = _seed_account(db_session, fs_db, "alice@example.com")
-    fs_before = dict(fs_db._store)
+    uid, bid = _seed_account(db_session, "alice@example.com")
     _login(client, uid)
 
     resp = client.delete("/api/auth/account", json={})
     assert resp.status_code == 400
     assert resp.get_json() == {"success": False, "error": "Email confirmation does not match"}
-    assert fs_db._store == fs_before
     assert _user_rows(db_session, uid) == 1
 
 
 def test_delete_account_unauthenticated_401(account_db, client):
-    fs_db, auth_api = account_db
     with client.session_transaction() as sess:
         sess.clear()
 
@@ -937,7 +707,6 @@ def test_delete_account_unauthenticated_401(account_db, client):
 
 
 def test_delete_account_missing_user_404(account_db, db_session, client):
-    fs_db, auth_api = account_db
     _login(client, ABSENT_UUID)
 
     resp = client.delete("/api/auth/account", json={"confirm_email": "alice@example.com"})
@@ -1012,8 +781,6 @@ def test_delete_account_cascades_full_postgres_tree(account_db, db_session, clie
     user → businesses → {connections, gtm_runs, agent_runs→observations,
     opportunities→actions, executions→{measurements,learnings}}.
     A second user's full tree is completely untouched."""
-    fs_db, auth_api = account_db
-
     # ── User 1: full multi-level tree ──
     u1 = seed_user(db_session, email="u1cascade@example.com")
     uid1 = str(u1.id)
@@ -1040,8 +807,6 @@ def test_delete_account_cascades_full_postgres_tree(account_db, db_session, clie
     meas1_id = meas1.id
     lrn1_id = lrn1.id
 
-    fs_db._store[("student_profiles", uid1)] = {"bio": "hi"}
-
     # ── User 2: isolation check ──
     u2 = seed_user(db_session, email="u2cascade@example.com")
     uid2 = str(u2.id)
@@ -1049,7 +814,6 @@ def test_delete_account_cascades_full_postgres_tree(account_db, db_session, clie
     bid2 = str(biz2.id)
     conn2 = _seed_connection(db_session, bid2)
     conn2_id = conn2.id
-    fs_db._store[("student_profiles", uid2)] = {"bio": "there"}
 
     _login(client, uid1)
     resp = client.delete("/api/auth/account", json={"confirm_email": "u1cascade@example.com"})
@@ -1069,10 +833,8 @@ def test_delete_account_cascades_full_postgres_tree(account_db, db_session, clie
     assert db_session.get(Execution, exc1_id) is None
     assert db_session.get(Measurement, meas1_id) is None
     assert db_session.get(Learning, lrn1_id) is None
-    assert ("student_profiles", uid1) not in fs_db._store
 
     # User 2: completely untouched
     assert db_session.get(User, uid2) is not None
     assert db_session.get(Business, bid2) is not None
     assert db_session.get(Connection, conn2_id) is not None
-    assert ("student_profiles", uid2) in fs_db._store
