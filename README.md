@@ -245,6 +245,8 @@ celery -A task worker --loglevel=info --pool=solo
 > `from app import app` in `ContextTask` always resolves, but `celery -A task` itself
 > still needs `task.py` to be on its initial module path (guaranteed when CWD is `backend/`).
 
+> **Render deploy:** set `PYTHONPATH=/opt/render/project/src/backend` on the backend service so the Celery worker can import `app`/`routes` at task-run time (the lazy `from app import app` in `ContextTask`). Without it the worker raises `ModuleNotFoundError: No module named 'app'`.
+
 ### Step 4 — Flask API (terminal 3, venv active)
 ```bash
 python app.py
