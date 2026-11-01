@@ -1,6 +1,17 @@
 import logging
 import os
+import sys
 from datetime import datetime
+
+# Ensure backend/ is on sys.path before any lazy import resolves it.
+# ContextTask.__call__ does `from app import app` at task-run time; under
+# `celery -A task worker` the CWD is not guaranteed to be on sys.path at that
+# moment, so the import raises ModuleNotFoundError even though backend/app.py
+# exists. Inserting _HERE at module load (which always runs from backend/)
+# mirrors the precedent in app.py and fixes the production crash.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 from celery import Celery
 from redis.exceptions import (
     ConnectionError as RedisConnectionError,

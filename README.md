@@ -240,6 +240,11 @@ celery -A task worker --loglevel=info --pool=solo
 ```
 > **`--pool=solo` is REQUIRED on Windows** — without it Celery crashes with `WinError 5`.
 
+> **CWD must be `backend/`** — run the above command from the `backend/` directory.
+> `task.py` inserts its own directory into `sys.path` at load time so the lazy
+> `from app import app` in `ContextTask` always resolves, but `celery -A task` itself
+> still needs `task.py` to be on its initial module path (guaranteed when CWD is `backend/`).
+
 ### Step 4 — Flask API (terminal 3, venv active)
 ```bash
 python app.py
