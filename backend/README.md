@@ -483,8 +483,11 @@ cp .env.example .env
 # 5. Start Redis
 redis-server &
 
-# 6. Start the Celery worker (in a separate terminal)
+# 6. Start the Celery worker (in a separate terminal, from backend/)
 celery -A task worker --loglevel=info
+# Note: the worker must run from backend/ (where task.py lives). task.py inserts
+# backend/ into sys.path at load time so the lazy `from app import app` inside
+# ContextTask always resolves — but the CWD must still be backend/ for -A task to find task.py.
 
 # 7. Start the Flask development server
 python app.py
