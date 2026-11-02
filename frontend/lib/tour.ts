@@ -42,6 +42,13 @@ export const TOUR_STEPS: TourStep[] = [
     body: "This is where I show you the biggest gaps I find each week, ranked so the one that matters most is first.",
   },
   {
+    target: "nav-gtm",
+    screen: "/opportunities",
+    radius: 8,
+    title: "I size up your competition",
+    body: "This is where I look at your site next to your rivals, score what’s working and what isn’t, and hand you a draft plan to close the gap. You review it, I never act on my own.",
+  },
+  {
     target: "nav-campaigns",
     screen: "/opportunities",
     radius: 8,
