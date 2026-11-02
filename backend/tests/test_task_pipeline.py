@@ -193,7 +193,9 @@ def test_opportunity_value_error_triggers_retry(task_env, monkeypatch):
 
     # called_directly=False simulates a real Celery worker context — without it
     # self.retry() raises the original exc instead of CeleryRetry.
-    task_mod.analyze_business_website.push_request(called_directly=False)
+    # is_eager=True makes self.retry() raise Retry directly without touching the
+    # broker (no Redis needed in CI).
+    task_mod.analyze_business_website.push_request(called_directly=False, is_eager=True)
     try:
         with pytest.raises(CeleryRetry):
             task_mod.analyze_business_website.run(bid, uid, run_id)
