@@ -240,6 +240,79 @@ def test_analyze_gtm_tiles_persistent_429_returns_graceful_default(monkeypatch):
     assert result["opportunities"] == []
 
 
+# BUG 2 — image cap tests
+def _make_tile(tmp_path, name="tile.webp"):
+    p = tmp_path / name
+    p.write_bytes(b"img")
+    return {"path": str(p)}
+
+
+def test_max_vision_images_constant_exists():
+    from agent.gtm_engine import MAX_VISION_IMAGES
+    assert MAX_VISION_IMAGES == 3
+
+
+def test_build_gtm_multimodal_prompt_image_cap_2_competitors(tmp_path):
+    """2 comps × 2 tiles each + 3 user tiles → exactly 3 images (1 user + 1 + 1)."""
+    user_manifest = {
+        "url": "https://user.com",
+        "tiles": [_make_tile(tmp_path, f"u{i}.webp") for i in range(3)],
+    }
+    competitor_manifests = [
+        {"url": "https://comp1.com", "tiles": [_make_tile(tmp_path, f"c1t{i}.webp") for i in range(2)]},
+        {"url": "https://comp2.com", "tiles": [_make_tile(tmp_path, f"c2t{i}.webp") for i in range(2)]},
+    ]
+    messages = build_gtm_multimodal_prompt(user_manifest, competitor_manifests, ["q"])
+    content = messages[1]["content"]
+    imgs = [item for item in content if item.get("type") == "image_url"]
+    assert len(imgs) == 3
+
+
+def test_build_gtm_multimodal_prompt_image_cap_1_competitor(tmp_path):
+    """1 comp × 2 tiles + 3 user tiles → at most 3 images (2 user + 1 comp)."""
+    user_manifest = {
+        "url": "https://user.com",
+        "tiles": [_make_tile(tmp_path, f"u{i}.webp") for i in range(3)],
+    }
+    competitor_manifests = [
+        {"url": "https://comp1.com", "tiles": [_make_tile(tmp_path, f"c1t{i}.webp") for i in range(2)]},
+    ]
+    messages = build_gtm_multimodal_prompt(user_manifest, competitor_manifests, ["q"])
+    content = messages[1]["content"]
+    imgs = [item for item in content if item.get("type") == "image_url"]
+    assert len(imgs) <= 3
+    assert len(imgs) == 3  # balanced: 2 user + 1 comp
+
+
+def test_build_gtm_multimodal_prompt_image_cap_0_competitors(tmp_path):
+    """0 competitors + 3 user tiles → at most 3 images."""
+    user_manifest = {
+        "url": "https://user.com",
+        "tiles": [_make_tile(tmp_path, f"u{i}.webp") for i in range(3)],
+    }
+    messages = build_gtm_multimodal_prompt(user_manifest, [], ["q"])
+    content = messages[1]["content"]
+    imgs = [item for item in content if item.get("type") == "image_url"]
+    assert len(imgs) <= 3
+
+
+def test_build_gtm_multimodal_prompt_competitor_text_labels(tmp_path):
+    """Each competitor keeps its text label even when it contributes only 1 tile."""
+    user_manifest = {
+        "url": "https://user.com",
+        "tiles": [_make_tile(tmp_path, f"u{i}.webp") for i in range(3)],
+    }
+    competitor_manifests = [
+        {"url": "https://comp1.com", "tiles": [_make_tile(tmp_path, "c1.webp")]},
+        {"url": "https://comp2.com", "tiles": [_make_tile(tmp_path, "c2.webp")]},
+    ]
+    messages = build_gtm_multimodal_prompt(user_manifest, competitor_manifests, ["q"])
+    content = messages[1]["content"]
+    text_items = [item["text"] for item in content if item.get("type") == "text"]
+    assert any("comp1.com" in t for t in text_items)
+    assert any("comp2.com" in t for t in text_items)
+
+
 def test_parse_gtm_vision_output_with_raw_string_and_invalid_values():
     raw_str = """{
         "gtm_scores": {"overall": "bad", "above_the_fold": 120, "pricing_clarity": -10},

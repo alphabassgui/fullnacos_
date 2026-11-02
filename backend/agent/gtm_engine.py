@@ -26,6 +26,8 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+MAX_VISION_IMAGES: int = int(os.environ.get("GROQ_VISION_MAX_IMAGES", 3))
+
 GTM_SYSTEM_PROMPT = """You are an elite B2B Go-To-Market (GTM) strategist and Conversion Rate Optimization (CRO) expert.
 You evaluate companies by visually analyzing screenshot tiles of their landing pages compared directly against top market competitors.
 
@@ -193,6 +195,13 @@ def build_gtm_multimodal_prompt(
     user_url = user_manifest.get("url", "User Website")
     user_tiles = user_manifest.get("tiles", [])
 
+    # Balanced image budget: 1 tile per competitor, remainder to user.
+    # Hard cap = MAX_VISION_IMAGES (Groq vision model limit).
+    capped_comps = competitor_manifests[:2]
+    n_comp = len(capped_comps)
+    user_budget = max(1, MAX_VISION_IMAGES - n_comp)
+    image_counter = 0  # hard safety counter — never exceeds MAX_VISION_IMAGES
+
     user_content: list[dict[str, Any]] = [
         {
             "type": "text",
@@ -204,8 +213,9 @@ def build_gtm_multimodal_prompt(
         }
     ]
 
-    # Add up to 3 tiles for user site
-    for tile in user_tiles[:3]:
+    for tile in user_tiles[:user_budget]:
+        if image_counter >= MAX_VISION_IMAGES:
+            break
         tile_path = tile.get("path")
         if tile_path:
             uri = encode_tile_to_base64(tile_path)
@@ -214,14 +224,17 @@ def build_gtm_multimodal_prompt(
                     "type": "image_url",
                     "image_url": {"url": uri},
                 })
+                image_counter += 1
 
-    for idx, comp in enumerate(competitor_manifests[:2], start=1):
+    for idx, comp in enumerate(capped_comps, start=1):
         comp_url = comp.get("url", f"Competitor {idx}")
         user_content.append({
             "type": "text",
             "text": f"\nHere are screenshot tiles for MARKET COMPETITOR {idx}: {comp_url}",
         })
-        for tile in comp.get("tiles", [])[:2]:
+        for tile in comp.get("tiles", [])[:1]:
+            if image_counter >= MAX_VISION_IMAGES:
+                break
             tile_path = tile.get("path")
             if tile_path:
                 uri = encode_tile_to_base64(tile_path)
@@ -230,6 +243,7 @@ def build_gtm_multimodal_prompt(
                         "type": "image_url",
                         "image_url": {"url": uri},
                     })
+                    image_counter += 1
 
     user_content.append({
         "type": "text",
