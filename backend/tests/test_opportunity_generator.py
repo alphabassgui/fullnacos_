@@ -143,10 +143,25 @@ def test_invalid_json_raises(og, fake_client, monkeypatch):
         og.generate_opportunities(ANALYSIS)
 
 
-def test_non_object_payload_raises(og, fake_client, monkeypatch):
-    # A bare JSON array (not the expected {"opportunities": [...]} object).
+def test_bare_array_is_wrapped_and_succeeds(og, fake_client, monkeypatch):
+    # Layer-1 fix: model returns a bare JSON array → wrapped into {"opportunities": [...]}.
     monkeypatch.setattr(og, "client", fake_client["build"](json.dumps([VALID_ITEM])))
-    with pytest.raises(ValueError, match="Opportunity response must be a JSON object"):
+    result = og.generate_opportunities(ANALYSIS)
+    assert result == [VALID_ITEM]
+
+
+def test_fenced_json_object_is_unwrapped_and_succeeds(og, fake_client, monkeypatch):
+    # Model wraps valid JSON in ```json ... ``` fences → stripped before parse.
+    fenced = "```json\n" + json.dumps({"opportunities": [VALID_ITEM]}) + "\n```"
+    monkeypatch.setattr(og, "client", fake_client["build"](fenced))
+    result = og.generate_opportunities(ANALYSIS)
+    assert result == [VALID_ITEM]
+
+
+def test_garbage_non_json_still_raises(og, fake_client, monkeypatch):
+    # Genuine non-JSON garbage must still propagate as an invalid-JSON ValueError.
+    monkeypatch.setattr(og, "client", fake_client["build"]("I am not JSON at all!"))
+    with pytest.raises(ValueError, match="Groq returned invalid opportunity JSON"):
         og.generate_opportunities(ANALYSIS)
 
 

@@ -33,7 +33,7 @@ Business understanding:
 
 {json.dumps(business_analysis, indent=2, ensure_ascii=False)}
 
-Return a JSON array containing opportunities.
+Return a JSON object with an "opportunities" array.
 """
 
     response = create_chat_completion(
@@ -117,12 +117,28 @@ Return a JSON array containing opportunities.
     if not result:
         raise ValueError("Groq returned an empty response")
 
+    # Strip markdown code fences the model occasionally wraps around JSON.
+    stripped = result.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        # Drop the opening fence line (```json or ```) and the closing ```.
+        inner = lines[1:] if len(lines) > 1 else lines
+        if inner and inner[-1].strip() == "```":
+            inner = inner[:-1]
+        stripped = "\n".join(inner).strip()
+
     try:
-        payload = json.loads(result)
+        payload = json.loads(stripped)
     except json.JSONDecodeError as exc:
         raise ValueError(
             "Groq returned invalid opportunity JSON"
         ) from exc
+
+    # The schema requires an object {opportunities:[...]}, but the model
+    # sometimes returns a bare array when it follows the old prompt text.
+    # Wrap it so the rest of the pipeline sees the expected shape.
+    if isinstance(payload, list):
+        payload = {"opportunities": payload}
 
     if not isinstance(payload, dict):
         raise ValueError(
