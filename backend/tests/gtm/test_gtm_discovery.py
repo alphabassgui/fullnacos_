@@ -203,3 +203,24 @@ def test_get_gtm_seed_queries_fallback_when_no_business():
 
     assert len(queries) >= 1
 
+
+# BUG 1 — tavily.com must not appear as a competitor
+def test_tavily_domain_in_excluded_domains_constant():
+    """EXCLUDED_DOMAINS must block the Tavily search provider."""
+    assert "tavily.com" in EXCLUDED_DOMAINS
+    assert "api.tavily.com" in EXCLUDED_DOMAINS
+
+
+def test_filter_competitor_domains_drops_tavily():
+    """Tavily result URLs must be filtered out as non-competitors."""
+    raw_results = [
+        {"url": "https://tavily.com/"},
+        {"url": "https://api.tavily.com/search"},
+        {"url": "https://real-competitor.com/features"},
+    ]
+    competitors = filter_competitor_domains(raw_results)
+    domains = [c["domain"] for c in competitors]
+    assert "tavily.com" not in domains
+    assert "api.tavily.com" not in domains
+    assert "real-competitor.com" in domains
+

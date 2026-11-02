@@ -45,6 +45,8 @@ EXCLUDED_DOMAINS: frozenset[str] = frozenset({
     "bloom.app",
     "blom.ai",
     "blom.app",
+    "tavily.com",
+    "api.tavily.com",
 })
 
 
