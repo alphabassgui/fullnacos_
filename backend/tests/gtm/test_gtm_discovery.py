@@ -134,33 +134,49 @@ def test_discover_competitors_raises_if_unauthorized():
             discover_competitors("biz-1", "user-1")
 
 
-def test_search_organic_competitors_parses_html():
+def test_search_organic_competitors_returns_url_list(monkeypatch):
+    """Tavily response is mapped to [{"url": ...}]; no network is hit."""
+    import tavily
     from services.gtm_discovery_service import search_organic_competitors
 
-    html = """
-    <html>
-      <body>
-        <a class="result__url" href="https://comp-a.com">comp-a.com</a>
-        <a class="result__url" href="https://comp-b.com">comp-b.com</a>
-      </body>
-    </html>
-    """
-    mock_resp = MagicMock()
-    mock_resp.status_code = 200
-    mock_resp.text = html
+    fake_response = {
+        "results": [
+            {"url": "https://rival.com/x", "title": "Rival", "content": "...", "score": 0.9},
+            {"url": "https://other.io/pricing", "title": "Other", "content": "...", "score": 0.7},
+            {"url": "", "title": "Bad", "content": "...", "score": 0.1},  # no url — filtered
+        ]
+    }
+    mock_client = MagicMock()
+    mock_client.search.return_value = fake_response
 
-    with patch("services.gtm_discovery_service.requests.get", return_value=mock_resp):
-        hits = search_organic_competitors("b2b saas", max_results=2)
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test-key")
+    with patch.object(tavily, "TavilyClient", return_value=mock_client):
+        hits = search_organic_competitors("b2b saas", max_results=5)
 
-    assert len(hits) == 2
-    assert hits[0]["link"] == "https://comp-a.com"
+    assert hits == [{"url": "https://rival.com/x"}, {"url": "https://other.io/pricing"}]
+    mock_client.search.assert_called_once_with("b2b saas", search_depth="basic", max_results=5)
 
 
-def test_search_organic_competitors_handles_network_error():
+def test_search_organic_competitors_missing_key_returns_empty(monkeypatch):
+    """Missing TAVILY_API_KEY logs a warning and returns [] without raising."""
     from services.gtm_discovery_service import search_organic_competitors
 
-    with patch("services.gtm_discovery_service.requests.get", side_effect=Exception("Timeout")):
-        hits = search_organic_competitors("error query")
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    hits = search_organic_competitors("some query")
+    assert hits == []
+
+
+def test_search_organic_competitors_exception_returns_empty(monkeypatch):
+    """Any exception during search is caught; [] returned, nothing raised."""
+    import tavily
+    from services.gtm_discovery_service import search_organic_competitors
+
+    mock_client = MagicMock()
+    mock_client.search.side_effect = RuntimeError("network fail")
+
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test-key")
+    with patch.object(tavily, "TavilyClient", return_value=mock_client):
+        hits = search_organic_competitors("boom query")
     assert hits == []
 
 

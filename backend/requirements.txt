@@ -61,6 +61,7 @@ requests==2.34.2
 six==1.17.0
 soupsieve==2.9.2
 SQLAlchemy==2.0.53
+tavily-python==0.5.0
 typing_extensions==4.16.0
 tzdata==2026.4
 tzlocal==5.4.4

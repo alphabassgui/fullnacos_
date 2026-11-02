@@ -9,12 +9,11 @@ Discovers relevant direct market competitors for a business using:
 from __future__ import annotations
 
 import logging
+import os
 from datetime import date, timedelta
 from typing import Any
 from urllib.parse import urlparse
 
-import requests
-from bs4 import BeautifulSoup
 from connectors.google_search_console import GoogleSearchConsoleAPI
 from services.connection_service import get_connection
 from models import get_business_row
@@ -183,37 +182,23 @@ def get_gtm_seed_queries(business_id: str, user_id: str) -> list[str]:
 
 def search_organic_competitors(query: str, max_results: int = 10) -> list[dict[str, str]]:
     """
-    Search organic search results for a given query.
-    Uses HTML search parsing with graceful fallback on network error.
+    Search organic results for a given query via Tavily.
+    Returns [] gracefully on missing key or any error so the GTM run still completes.
     """
-    results: list[dict[str, str]] = []
     try:
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
+        api_key = os.environ.get("TAVILY_API_KEY")
+        if not api_key:
+            logger.warning(
+                "TAVILY_API_KEY is not set; skipping organic search for '%s'", query
             )
-        }
-        # HTML search query
-        resp = requests.get(
-            "https://html.duckduckgo.com/html/",
-            params={"q": query},
-            headers=headers,
-            timeout=8,
-        )
-        if resp.status_code == 200:
-            soup = BeautifulSoup(resp.text, "html.parser")
-            for a in soup.find_all("a", class_="result__url"):
-                href = a.get("href")
-                if href:
-                    results.append({"link": href.strip()})
-                    if len(results) >= max_results:
-                        break
+            return []
+        from tavily import TavilyClient  # lazy import — no key required at import time
+        client = TavilyClient(api_key=api_key)
+        response = client.search(query, search_depth="basic", max_results=max_results)
+        return [{"url": r["url"]} for r in response.get("results", []) if r.get("url")]
     except Exception as exc:
         logger.warning("Organic search lookup error for '%s': %s", query, exc)
-
-    return results
+        return []
 
 
 def discover_competitors(
