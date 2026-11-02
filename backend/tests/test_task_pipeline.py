@@ -178,7 +178,38 @@ def test_fetch_failure_fails_run_gracefully_without_raising(task_env, monkeypatc
     assert not _opportunities(db_session, bid)
 
 
-def test_opportunity_groq_failure_marks_run_failed(task_env, monkeypatch):
+def test_opportunity_value_error_triggers_retry(task_env, monkeypatch):
+    """A ValueError from generate_opportunities should trigger a Celery retry,
+    not immediately mark the run as failed (Layer 2 fix)."""
+    from celery.exceptions import Retry as CeleryRetry
+
+    task_mod, db_session, bid, uid, run_id = task_env
+    import agent.opportunity_generator as generator_mod
+
+    monkeypatch.setattr(
+        generator_mod, "generate_opportunities",
+        lambda analysis: (_ for _ in ()).throw(ValueError("bad JSON shape")),
+    )
+
+    # called_directly=False simulates a real Celery worker context — without it
+    # self.retry() raises the original exc instead of CeleryRetry.
+    # is_eager=True makes self.retry() raise Retry directly without touching the
+    # broker (no Redis needed in CI).
+    task_mod.analyze_business_website.push_request(called_directly=False, is_eager=True)
+    try:
+        with pytest.raises(CeleryRetry):
+            task_mod.analyze_business_website.run(bid, uid, run_id)
+    finally:
+        task_mod.analyze_business_website.pop_request()
+
+    # Run must NOT be failed yet — it is pending a retry.
+    run = _run(db_session, run_id)
+    assert run.status != "failed"
+
+
+def test_opportunity_value_error_exhausted_marks_run_failed(task_env, monkeypatch):
+    """When all retries are exhausted the existing failure path must mark the
+    run as failed so the frontend shows 'Scan failed · Try again'."""
     task_mod, db_session, bid, uid, run_id = task_env
     import agent.opportunity_generator as generator_mod
 
@@ -187,8 +218,13 @@ def test_opportunity_groq_failure_marks_run_failed(task_env, monkeypatch):
         lambda analysis: (_ for _ in ()).throw(ValueError("bad JSON")),
     )
 
-    with pytest.raises(ValueError, match="bad JSON"):
-        task_mod.analyze_business_website.run(bid, uid, run_id)
+    # Simulate exhausted retries: push a request context with retries == max_retries.
+    task_mod.analyze_business_website.push_request(retries=2)
+    try:
+        with pytest.raises(ValueError, match="bad JSON"):
+            task_mod.analyze_business_website.run(bid, uid, run_id)
+    finally:
+        task_mod.analyze_business_website.pop_request()
 
     run = _run(db_session, run_id)
     assert run.status == "failed"

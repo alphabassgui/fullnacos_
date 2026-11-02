@@ -13,6 +13,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 from celery import Celery
+from celery.exceptions import Retry as CeleryRetry
 from redis.exceptions import (
     ConnectionError as RedisConnectionError,
     TimeoutError as RedisTimeoutError,
@@ -242,7 +243,14 @@ def analyze_business_website(self, business_id, user_id, run_id):
         try:
             analysis = analyze_observation(observation)
 
-            opportunities = generate_opportunities(analysis)
+            try:
+                opportunities = generate_opportunities(analysis)
+            except ValueError as exc:
+                # Retry a transient LLM shape error a bounded number of times
+                # before surfacing "Scan failed". The observation upsert above is
+                # idempotent (ON CONFLICT DO UPDATE keyed on run_id), so retrying
+                # here will not double-write any state.
+                raise self.retry(exc=exc, max_retries=2, countdown=5)
 
             opportunity_ids = []
 
@@ -289,6 +297,8 @@ def analyze_business_website(self, business_id, user_id, run_id):
                 run.updated_at = completed_now
                 orm_db.session.commit()
 
+        except CeleryRetry:
+            raise
         except Exception as exc:
             orm_db.session.rollback()
             _fail_run(str(exc))
@@ -303,6 +313,8 @@ def analyze_business_website(self, business_id, user_id, run_id):
             "run_id": run_id,
         }
 
+    except CeleryRetry:
+        raise
     except Exception as exc:
         # Mark run as failed
         orm_db.session.rollback()
