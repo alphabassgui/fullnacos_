@@ -355,6 +355,9 @@ export type FlaskAction = {
   confidence: number;
   opportunity_id: string;
   status: string;
+  /** For a github action: the repo file the edit targets. Null until the owner
+   *  confirms one (see resolveActionPath / setActionTargetPath). */
+  target_path?: string | null;
   [key: string]: unknown;
 };
 
@@ -415,6 +418,36 @@ export function approveAction(businessId: string, actionId: string): Promise<Api
 /** POST /api/business/<id>/actions/<actionId>/reject → sets the action rejected. */
 export function rejectAction(businessId: string, actionId: string): Promise<ApiResult> {
   return apiFetch(`/api/business/${businessId}/actions/${actionId}/reject`, { method: "POST" });
+}
+
+/**
+ * GET /api/business/<id>/actions/<actionId>/resolve-path →
+ * {status: "confirmed" | "needs_confirmation" | "no_candidates", path?, candidates?}.
+ * A github action edits ONE real repo file; the planner never guesses the path, so
+ * before approval the owner confirms a real file. This recomputes the shortlist, on
+ * demand, against the repository's CURRENT tree — nothing is cached on the action.
+ * "confirmed" means the path already exists; "needs_confirmation" returns candidates
+ * to choose from; "no_candidates" means no editable page/metadata file was found.
+ */
+export function resolveActionPath(businessId: string, actionId: string): Promise<ApiResult> {
+  return apiFetch(`/api/business/${businessId}/actions/${actionId}/resolve-path`);
+}
+
+/**
+ * PATCH /api/business/<id>/actions/<actionId>/target-path  body {target_path}.
+ * Persists the owner's confirmed file. The backend re-validates the path against the
+ * live tree (only a file that really exists is accepted) and allows it only while the
+ * action is still pending_approval — after approval the target is locked in.
+ */
+export function setActionTargetPath(
+  businessId: string,
+  actionId: string,
+  targetPath: string,
+): Promise<ApiResult> {
+  return apiFetch(`/api/business/${businessId}/actions/${actionId}/target-path`, {
+    method: "PATCH",
+    body: JSON.stringify({ target_path: targetPath }),
+  });
 }
 
 /** GET /api/business/<id>/executions/<executionId> → {execution:{...}}. Polled until terminal. */
