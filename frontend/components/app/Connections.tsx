@@ -530,14 +530,29 @@ function GithubConnection({ businessId, showToast }: { businessId: string; showT
         setPhase({ kind: "not_connected" });
         return;
       }
-      const list =
+      const data =
         result.ok && result.data && typeof result.data === "object"
-          ? (result.data as { repositories?: FlaskGithubRepository[] }).repositories
+          ? (result.data as {
+              repositories?: FlaskGithubRepository[];
+              selected_repository?: string | null;
+              selected_default_branch?: string | null;
+            })
           : null;
+      const list = data ? data.repositories : null;
       if (!result.ok || !Array.isArray(list)) {
         setPhase({ kind: "error" });
         return;
       }
+      // Restore the saved selection so it survives leaving and returning to this
+      // page — the choice was always persisted server-side; the client just never
+      // read it back before.
+      const savedRepo = data ? data.selected_repository : null;
+      const savedBranch = data ? data.selected_default_branch : null;
+      setSelected(
+        typeof savedRepo === "string" && savedRepo
+          ? { repository: savedRepo, default_branch: typeof savedBranch === "string" ? savedBranch : "" }
+          : null,
+      );
       setPhase({ kind: "connected", repositories: list });
     });
   }, [businessId, router]);

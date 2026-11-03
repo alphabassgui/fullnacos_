@@ -112,9 +112,14 @@ def github_repositories():
 
         repositories = github.list_repositories()
 
+        # Echo back which repository is currently persisted for this connection,
+        # so the UI can restore the selection on reload instead of showing nothing
+        # picked (the choice IS saved; the client just had no way to read it back).
         return jsonify({
             "success": True,
             "repositories": repositories,
+            "selected_repository": connection.get("repository"),
+            "selected_default_branch": connection.get("default_branch"),
         })
 
     except PermissionError as exc:
