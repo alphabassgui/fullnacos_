@@ -129,27 +129,28 @@ def test_execute_action_completed_social(db_session, monkeypatch):
     assert action.status == "completed"
 
 
-def test_execute_action_unrouted_type_marks_failed(db_session):
+def test_execute_action_no_write_path_type_completes_as_draft(db_session, monkeypatch):
+    # A type with no write path (email/seo/content/…) no longer fails on approve:
+    # it routes to the honest draft-only fallback and completes, so the owner sees
+    # a clear "drafted, not auto-applied" result instead of an error.
     import services.execution_engine as execution_engine
 
     uid, bid = _setup(db_session)
     action = seed_action(db_session, bid, uid, action_type="email", status="approved")
     execution = seed_execution(db_session, bid, uid, action.id, status="queued")
 
-    with pytest.raises(
-        ValueError, match="No connector available for action type: email"
-    ):
-        execution_engine.execute_action(bid, str(execution.id))
+    # Real get_connector (the point of the test) -> DraftOnlyConnector; only the
+    # post-execute measurement step is stubbed, like the other completed-path tests.
+    _stub_post_execute(execution_engine, monkeypatch)
+
+    execution_engine.execute_action(bid, str(execution.id))
 
     db_session.refresh(execution)
     db_session.refresh(action)
-    assert execution.status == "failed"
-    assert execution.error == "No connector available for action type: email"
-    assert execution.completed_at
-
-    assert action.status == "failed"
-    assert action.error == "No connector available for action type: email"
-    assert action.updated_at
+    assert execution.status == "completed"
+    assert action.status == "completed"
+    assert action.completed_at
+    assert not action.error
 
 
 def test_execute_action_missing_execution_raises(db_session):

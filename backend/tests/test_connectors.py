@@ -6,16 +6,17 @@ from connectors import get_connector
 from connectors.dry_run import DryRunConnector
 from connectors.github import GitHubConnector
 from connectors.instagram import InstagramConnector
-from connectors.website import WebsiteConnector
+from connectors.draft_only import DraftOnlyConnector
 
 
-# "website" and "social" are routed; these remain without a connector.
-UNROUTED_TYPES = ["content", "seo", "email", "research", "other"]
+# Types with no real write path. They used to raise (content/seo/…) or fake a
+# dry-run success (website); now they all route to the honest draft-only fallback.
+DRAFT_ONLY_TYPES = ["website", "content", "seo", "email", "research", "other"]
 
 
 @pytest.mark.parametrize(
     "connector_cls",
-    [InstagramConnector, DryRunConnector, WebsiteConnector, GitHubConnector],
+    [InstagramConnector, DryRunConnector, DraftOnlyConnector, GitHubConnector],
 )
 def test_execute_accepts_execution_id_kwarg(connector_cls):
     # The execution engine calls connector.execute(action, business_id, user_id,
@@ -30,10 +31,31 @@ def test_get_connector_social_returns_instagram_connector():
     assert isinstance(connector, InstagramConnector)
 
 
-@pytest.mark.parametrize("action_type", UNROUTED_TYPES)
-def test_get_connector_unrouted_action_type_raises(action_type):
-    with pytest.raises(ValueError, match="No connector available for action type"):
-        get_connector({"action_type": action_type})
+def test_get_connector_github_returns_github_connector():
+    connector = get_connector({"action_type": "github"})
+    assert isinstance(connector, GitHubConnector)
+
+
+@pytest.mark.parametrize("action_type", DRAFT_ONLY_TYPES)
+def test_get_connector_no_write_path_returns_draft_only(action_type):
+    # No crash on approve: these resolve to the honest draft-only fallback.
+    connector = get_connector({"action_type": action_type})
+    assert isinstance(connector, DraftOnlyConnector)
+
+
+def test_draft_only_execute_is_honest_not_a_fake_success():
+    # success is True (the draft exists), but the status/message make clear nothing
+    # was published — never the old "validated successfully" wording.
+    result = DraftOnlyConnector().execute(
+        {"action_type": "seo", "action_title": "Improve meta description"},
+        "biz-1",
+        "user-1",
+        execution_id="exec-1",
+    )
+    assert result["success"] is True
+    assert result["status"] == "drafted_pending_manual"
+    assert "nothing was published" in result["message"].lower()
+    assert "validated successfully" not in result["message"].lower()
 
 
 @pytest.mark.parametrize(
@@ -41,6 +63,7 @@ def test_get_connector_unrouted_action_type_raises(action_type):
     [{}, {"action_type": None}, {"action_type": ""}],
 )
 def test_get_connector_missing_or_blank_action_type_raises(action):
+    # A malformed action (no type) is a bug, not a draft — it still raises.
     with pytest.raises(ValueError, match="No connector available for action type"):
         get_connector(action)
 

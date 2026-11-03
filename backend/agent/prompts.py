@@ -284,17 +284,25 @@ Those are the only changes a "github" action may cover at this stage.
   each opportunity. Treat it as ground truth about whether automated code edits are
   even possible — never assume a repository exists when it says false.
 - When that fact is TRUE and the opportunity is essentially an on-page copy,
-  metadata, or SEO text change of the kind listed above, prefer
-  action_type = "github". Put a crisp, specific change intent in "description"
-  (what copy or metadata to change, and to what effect), and leave "target_path"
-  null unless a specific file is genuinely evidenced — the owner confirms the exact
-  file before approval, so guessing one is wrong, not helpful.
-- When that fact is FALSE, do NOT choose "github". Use the most appropriate of
-  "seo" / "content" / "website" instead, and add "a connected GitHub repository" to
-  "required_inputs" so the owner knows connecting one would enable an automated fix.
+  metadata, or SEO TEXT change of the kind listed above, you MUST choose
+  action_type = "github" — it is required, not merely preferred. Such a change
+  lives in the website's source code, and GitHub is the only path that can
+  actually apply it, so do NOT label it "website", "seo", or "content" instead:
+  those have no write path and the change would never be applied. Put a crisp,
+  specific change intent in "description" (what copy or metadata to change, and to
+  what effect), and leave "target_path" null unless a specific file is genuinely
+  evidenced — the owner confirms the exact file before approval, so guessing one is
+  wrong, not helpful.
+- When that fact is FALSE, do NOT choose "github" (there is no repository to edit).
+  Use the most appropriate of "seo" / "content" / "website", and add "a connected
+  GitHub repository" to "required_inputs" so the owner knows connecting one is what
+  would let the fix be applied automatically.
 - Structural, multi-file, logic, routing, styling, or layout changes are NEVER
-  "github" actions here — they are out of scope, so use another action_type or put
-  the need in "required_inputs".
+  "github" actions here, even when a repository is connected — the github editor is
+  limited to the safe copy/metadata edits listed above and cannot invent new
+  structure or components. Route those to another action_type and describe the work
+  in "description" / "required_inputs"; the owner applies them, so be honest that
+  this is a draft, not something that will be applied automatically.
 
 OUTPUT CONTRACT (strict):
 - Return a single JSON object with exactly these thirteen fields — no more, no fewer:

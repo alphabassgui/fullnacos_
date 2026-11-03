@@ -201,3 +201,15 @@ def test_github_connected_defaults_false(de, monkeypatch):
     de.generate_action(OPPORTUNITY, ANALYSIS, business_id="biz-1")
 
     assert "GitHub repository connected: false" in _user_prompt(state)
+
+
+def test_prompt_requires_github_for_connected_copy_meta():
+    # Routing guard (Fix 1): for an on-page copy/metadata change with a repo
+    # connected, github must be REQUIRED, not optional, and relabelling it as a
+    # write-path-less type (website/seo/content) must be forbidden. If this
+    # guidance is softened, the opportunities that need the write path silently
+    # fall back to a draft-only action again.
+    prompt = prompts.DECISION_ENGINE_SYSTEM_PROMPT
+    assert "MUST choose" in prompt
+    assert "required, not merely preferred" in prompt
+    assert 'do NOT label it "website", "seo", or "content"' in prompt
