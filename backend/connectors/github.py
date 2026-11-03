@@ -15,10 +15,12 @@ class GitHubConnector(BaseConnector):
                 "GitHub connector only supports github actions"
             )
 
+        # `content` (the full new file) is NOT required here: for a planned
+        # action it is null, and we generate it at execution time from the real
+        # file (Option 1). It is accepted when already supplied (pre-grounded).
         required_fields = {
             "action_title",
             "description",
-            "content",
         }
 
         missing_fields = {
@@ -50,6 +52,9 @@ class GitHubConnector(BaseConnector):
                 "GitHub target_path cannot contain parent-directory traversal"
             )
 
+        if target_path.startswith("./"):
+            target_path = target_path[2:]
+
         connection = get_connection(
             business_id=business_id,
             user_id=user_id,
@@ -78,7 +83,23 @@ class GitHubConnector(BaseConnector):
             owner=owner,
             repo=repo,
         )
-        
+
+        # Resolve the file contents to commit. If the action already carries
+        # `content` (pre-grounded), use it. Otherwise generate it NOW from the
+        # file's real source — never from assumptions — after confirming the
+        # path actually exists in the repository tree.
+        content = action.get("content")
+        edit_summary = None
+        if not content:
+            content, edit_summary = self._grounded_content_for(
+                github=github,
+                owner=owner,
+                repo=repo,
+                default_branch=github_repo["default_branch"],
+                target_path=target_path,
+                action=action,
+            )
+
         branch_name = (
             "agent/"
             + action.get("action_title", "github-action")
@@ -88,39 +109,122 @@ class GitHubConnector(BaseConnector):
             + execution_id[:12]
         )
 
-        branch_result = self.create_action_branch(
+        # Branch -> commit -> open a Pull Request, in one guarded orchestration.
+        # Opening the PR is the point: it IS the draft the owner reviews, and
+        # merging it on GitHub is their approval to go live. Committing to the
+        # branch without a PR (the previous behavior) left the edit stranded
+        # where no one would see it.
+        pr_title = action["action_title"]
+        pr_body = self._build_pr_body(action, edit_summary=edit_summary)
+
+        change = self.create_change_and_pr(
             business_id=business_id,
             user_id=user_id,
             branch_name=branch_name,
-        )
-        
-        commit_result = self.update_file_on_branch(
-            business_id=business_id,
-            user_id=user_id,
-            branch_name=branch_result["branch"],
             path=target_path,
-            content=action["content"],
+            content=content,
             commit_message=action["action_title"],
+            pr_title=pr_title,
+            pr_body=pr_body,
         )
-        
-        
-    
+
         return {
             "success": True,
-            "status": "github_file_updated",
+            "status": "github_pr_opened",
             "message": (
-                "GitHub file updated successfully on the agent branch. "
-                "No pull request was created."
+                "Opened a pull request with the drafted change. Review and "
+                "merge it on GitHub to apply the edit."
             ),
             "business_id": business_id,
             "user_id": user_id,
             "repository": github_repo["full_name"],
             "default_branch": github_repo["default_branch"],
             "target_path": target_path,
-            "branch": branch_result,
-            "commit": commit_result,
+            "branch": change["branch"],
+            "commit": change["file"],
+            "pull_request": change["pull_request"],
             "action_title": action.get("action_title"),
         }
+
+    def _grounded_content_for(
+        self, github, owner, repo, default_branch, target_path, action,
+    ):
+        """Generate the new file contents from the file's REAL source.
+
+        Confirms ``target_path`` exists in the repository tree first — a
+        hallucinated or stale path never reaches an edit; instead the owner is
+        told which real files to choose from. Returns (new_content, summary).
+        """
+        import base64
+
+        from services.github_edit_service import (
+            resolve_target_file,
+            generate_grounded_edit,
+        )
+
+        base = github.get_branch(
+            owner=owner, repo=repo, branch=default_branch,
+        )
+        if not base:
+            raise ValueError(
+                "Could not read the repository's default branch"
+            )
+
+        resolution = resolve_target_file(
+            github_api=github,
+            owner=owner,
+            repo=repo,
+            base_sha=base["sha"],
+            evidenced_path=target_path,
+        )
+
+        if resolution["status"] != "confirmed":
+            candidates = resolution.get("candidates") or []
+            if candidates:
+                raise ValueError(
+                    f"Target file '{target_path}' was not found in the "
+                    "repository. Choose one of these existing files instead: "
+                    + ", ".join(candidates)
+                )
+            raise ValueError(
+                f"Target file '{target_path}' was not found in the repository, "
+                "and no editable page or metadata files were found to suggest."
+            )
+
+        file_data = github.get_file(
+            owner=owner,
+            repo=repo,
+            path=resolution["path"],
+            ref=default_branch,
+        )
+        original_content = base64.b64decode(
+            file_data["content"]
+        ).decode("utf-8")
+
+        edit = generate_grounded_edit(
+            resolution["path"], original_content, action,
+        )
+        return edit["content"], edit["summary"]
+
+    @staticmethod
+    def _build_pr_body(action, edit_summary=None):
+        """Compose a reviewer-facing PR description: what changed, why, and a
+        clear provenance + approval note tied to the honesty boundary."""
+        lines = [action.get("description") or action.get("action_title") or ""]
+        if edit_summary:
+            lines += ["", "**Change:** " + edit_summary]
+        reasoning = action.get("reasoning")
+        if reasoning:
+            lines += ["", "**Why:**", reasoning]
+        lines += [
+            "",
+            "---",
+            (
+                "Drafted automatically from a growth opportunity. This PR is a "
+                "proposal: nothing is live until you review and merge it."
+            ),
+        ]
+        return "\n".join(lines).strip()
     
     def create_action_branch( self, business_id, user_id, branch_name,):
         connection = get_connection(
