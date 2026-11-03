@@ -45,8 +45,8 @@ Under the hood:
                                       v
                                [ Backend: Flask :5000 ]
                                 /        |            \
-                        Firestore   Redis + Celery     Groq LLM
-                        (database)  (async jobs:       (text drafts +
+                        Supabase    Redis + Celery     Groq LLM
+                    (Postgres DB)   (async jobs:       (text drafts +
                                      analyze /          vision scoring)
                                      execute /
                                      GTM run)
@@ -63,7 +63,7 @@ Alongside the main loop, **GTM / PixelRAG** (section 5) runs as its own on-deman
 ## 3. Tech stack
 
 **Frontend** — Next.js 16 (App Router) · TypeScript · Tailwind CSS · shadcn/ui · Framer Motion
-**Backend** — Flask · Firebase / Firestore (database) · Redis + Celery (background jobs) · Groq (LLM)
+**Backend** — Flask · Supabase (Postgres, via SQLAlchemy + Flask-Migrate/Alembic) · Redis + Celery (background jobs) · Groq (LLM)
 **Visual GTM (PixelRAG)** — headless **Playwright Chromium** (full-page screenshots + vertical tiling → WebP) · **Groq Vision LLM** (multimodal scoring of your site vs competitors)
 **Auth** — Flask session **cookie** (the frontend calls the API with `credentials: 'include'`)
 
@@ -110,7 +110,7 @@ POST /api/gtm/run  (202 + run_id)                         [routes/gtm_routes.py]
         │  Celery task: run_gtm_analysis                  [task.py]
         ▼
 1. PixelRAG renders + tiles YOUR site        render_and_tile_page  [services/pixelrag_service.py]
-2. Discover up to 2 competitors (from GSC)   discover_competitors  [services/gtm_discovery_service.py]
+2. Discover up to 2 competitors (Tavily web search, seeded by GSC queries)   discover_competitors  [services/gtm_discovery_service.py]
 3. PixelRAG renders + tiles each competitor
 4. Vision LLM scores you vs them (4 pillars) analyze_gtm_tiles     [agent/gtm_engine.py]
 5. The gaps it finds are written as normal OPPORTUNITIES  create_opportunity
@@ -144,11 +144,13 @@ Two different kinds of timeout matter, plus one model-lifecycle risk:
 
 > **"Timeout of models" / model decommission risk:** the vision model id is **`GROQ_VISION_MODEL`** (default `qwen/qwen3.8-27b`). **Groq rotates and retires models** — the previous default (`llama-3.2-11b-vision-preview`) was **decommissioned**, which breaks a run with a model-not-found error until the env var is pointed at a current multimodal model. If GTM runs start failing at the vision step, **check this first**. (The text LLM used elsewhere is `GROQ_MODEL`.)
 
+> **Vision model image cap:** `qwen/qwen3.8-27b` (and most Groq vision models) accept a **maximum of 3 images** per request. The GTM payload is therefore capped at a balanced set: **1 user-site tile + 1 tile per competitor (up to 2)**. Exceeding 3 images previously caused a 400 error and flat-50 fallback scores; this cap prevents it.
+
 ### ⚠️ Risks & known limitations (read before demoing GTM)
 - **Tiles are transient.** They live on Render's **ephemeral disk**, which is wiped on every redeploy and is **not shared across instances**. An older run's screenshots can simply be gone. The UI treats this as best-effort: a broken image is hidden on error, and a run with no tiles shows **"Visual capture unavailable for this run"** instead of a broken layout. Treat tiles as best-effort, never as durable storage.
 - **Soft-fail still reports `completed`.** If the browser OOMs, a screenshot times out, or the vision model hiccups, the pipeline keeps going and the run completes with **empty tiles and/or flat `50` scores** (the clamp default). This is intentional (a run shouldn't hard-crash the loop) — but it means a "completed" run can be visually empty. The UI degrades gracefully; just **re-run** for a clean capture.
 - **Render free tier is memory-constrained.** Chromium launches with memory-safe flags (`--disable-dev-shm-usage` — the key OOM fix — plus `--no-sandbox`, `--disable-gpu`) and pages are closed/cleaned between captures. Heavy pages were the main source of screenshot timeouts; that's mitigated but not eliminated on the free tier.
-- **Competitor discovery depends on GSC seed queries.** If Search Console isn't connected / has no queries, competitor discovery is weaker, so the comparison is less useful.
+- **Competitor discovery uses the Tavily search API** (reliable from Render's datacenter IP, unlike the old DuckDuckGo HTML scrape which got rate-limited). It still uses GSC queries as seeds when available; if Search Console isn't connected the seeds are weaker, but Tavily still runs. Requires `TAVILY_API_KEY` in the backend env. Free tier ~500–1 000 searches/mo.
 - **Vision scoring is probabilistic.** Scores and blind spots are a model's read of screenshots, not ground truth — present them as guidance, not fact.
 - **The full completed result view was not exercised end-to-end against a live backend** during the frontend build (it was type-checked, linted, built, and verified for its non-ready/empty states). Eyeball a real completed run on a connected deploy before relying on it in a demo.
 
@@ -160,7 +162,8 @@ Two different kinds of timeout matter, plus one model-lifecycle risk:
 - **Python 3.11+** and **pip**
 - **Redis** running locally on `localhost:6379`
   - On **Windows**, use **Memurai** (a Redis-compatible service)
-- A **Firebase project + service account JSON** (the database is Firestore) — get the JSON file from **Felix**
+- A **Supabase Postgres database** (connection string in `DATABASE_URL`)
+- A **Tavily API key** (free tier) for GTM competitor discovery
 - A **Groq API key**
 - A **GitHub OAuth app** (only needed for the GitHub connection)
 - A **BMONI sandbox key** (only needed for payments) — ask **William**
@@ -181,7 +184,9 @@ There is **no example file** for the backend, so create `backend/.env` yourself 
 | Variable | What it is |
 |---|---|
 | `SECRET_KEY` | Signs the Flask session cookie. Any long random string. |
-| `FIREBASE_CREDENTIALS` | **Absolute path** to your Firebase service account JSON file (get it from Felix). |
+| `DATABASE_URL` | Supabase Postgres connection string. The backend inits SQLAlchemy + Flask-Migrate from it; app boots DB-less if unset. |
+| `TAVILY_API_KEY` | Tavily search API key for GTM competitor discovery. GTM still runs if unset; discovery just returns no competitors. |
+| `TEST_DATABASE_URL` | A **separate** throwaway Postgres URL for the pytest suite's DB-backed tests. Keep it off production; CI sets it. |
 | `GROQ_API_KEY` | Your Groq LLM API key. |
 | `GROQ_MODEL` | The **text** model id, e.g. `openai/gpt-oss-20b`. |
 | `GROQ_VISION_MODEL` | The **vision** model id for GTM / PixelRAG (default `qwen/qwen3.8-27b`). **Point it at a current multimodal model** — Groq retires these (see section 5 "Model & capture timeouts"). |
@@ -207,7 +212,7 @@ There is **no example file** for the backend, so create `backend/.env` yourself 
 | `DEMO_FALLBACK_ACCOUNT` | `true` — shows a labelled placeholder account if BMONI can't issue a real one, so the demo still runs. |
 | `CRON_SECRET`, `BMONI_MERCHANT_PHONE`, `APP_PUBLIC_URL`, `NEXT_PUBLIC_SUPABASE_*` | Optional — see the comments inside `env.example`. |
 
-> ⚠️ **Never commit** `.env`, `.env.local`, or the Firebase service account JSON. If you ever paste a key into a chat or a public place, rotate it.
+> ⚠️ **Never commit** `.env`, `.env.local`, or any credentials. If you ever paste a key into a chat or a public place, rotate it.
 
 ---
 
@@ -229,7 +234,9 @@ source venv/bin/activate
 
 pip install -r requirements.txt
 ```
-Then create `backend/.env` (section 7a) and make sure `FIREBASE_CREDENTIALS` points at your real service account JSON.
+Then create `backend/.env` (section 7a) and make sure `DATABASE_URL` points at your Supabase Postgres database, then run `python -m flask db upgrade` from `backend/` to apply the schema.
+
+> **Schema management:** the schema is managed by Alembic via Flask-Migrate. Run `python -m flask db upgrade` after setting `DATABASE_URL` (and again after any pull that adds new migrations in `backend/migrations/`).
 
 ### Step 2 — Redis (terminal 1)
 Start Redis (Windows: start **Memurai**). It must be reachable at `localhost:6379`.
@@ -300,7 +307,7 @@ All under cookie auth (`credentials: 'include'`). Business routes are under `/ap
 ## 11. Contributing
 
 - Branch off the latest `main` → open a PR → squash-merge → delete the branch.
-- **Never commit** `.env`, `.env.local`, or the Firebase service account JSON.
+- **Never commit** `.env`, `.env.local`, or any credentials.
 - Run `npm run lint` and `npm run build` (frontend) before opening a PR.
 
 ---
