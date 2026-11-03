@@ -477,3 +477,133 @@ def analyze_html(html):
         "headings": headings[:50],
         "links": links[:100],
     }
+
+
+# ---------------------------------------------------------------------------
+# Multi-page site analysis
+# ---------------------------------------------------------------------------
+#
+# The opportunity generator used to see ONLY the homepage: fetch_website_html
+# read one page and never followed its links. A site's /pricing, /contact,
+# /about or /services page was therefore invisible to the model, which then
+# hallucinated gaps ("no pricing page") for pages that plainly exist. This adds
+# a bounded follow of a few key internal links so the generator judges the site
+# on what it actually has.
+#
+# Every subpage URL still goes through fetch_website_html -> validate_and_pin,
+# so the SSRF / DNS-pinning / redirect guards above apply to each hop exactly
+# as they do to the homepage. Candidates are additionally constrained to the
+# homepage's own host, so a crawl can never wander off-site.
+
+# inventory flag  ->  path / anchor-text keywords that identify the page
+KEY_PAGE_PATTERNS = {
+    "pricing": ("pricing", "plans", "price", "packages", "quote"),
+    "contact": ("contact", "get-in-touch", "reach-us", "book"),
+    "about": ("about", "who-we-are", "our-story", "company"),
+    "services": ("services", "solutions", "what-we-do", "products"),
+}
+
+# How many extra pages (beyond the homepage) to fetch at most, per run.
+MAX_EXTRA_PAGES = 4
+
+
+def _same_site(base_url, candidate_url):
+    """True only when candidate is on the same host as base (never off-site)."""
+    try:
+        return _hostname_of(base_url) == _hostname_of(candidate_url)
+    except (AttributeError, ValueError):
+        return False
+
+
+def _classify_page(path, text):
+    """Return the inventory key this path / anchor-text matches, else None."""
+    haystack = f"{path} {text}".lower()
+    for key, keywords in KEY_PAGE_PATTERNS.items():
+        if any(kw in haystack for kw in keywords):
+            return key
+    return None
+
+
+def _select_key_subpages(homepage_analysis, base_url, max_pages):
+    """From the homepage's captured links, pick same-site key internal pages
+    (one per category: pricing / contact / about / services), deduped and
+    capped at ``max_pages``. Returns an ordered {category: url} mapping."""
+    selected = {}
+    for link in homepage_analysis.get("links", []):
+        if len(selected) >= max_pages:
+            break
+        href = (link.get("href") or "").strip()
+        if not href or href.startswith(
+            ("#", "mailto:", "tel:", "javascript:", "data:")
+        ):
+            continue
+
+        absolute = urljoin(base_url, href).split("#", 1)[0]
+        split = urlsplit(absolute)
+        if split.scheme not in ALLOWED_SCHEMES:
+            continue
+        if not _same_site(base_url, absolute):
+            continue
+        # Skip the homepage itself (root path or an exact self-link).
+        if absolute.rstrip("/") == base_url.rstrip("/") or split.path in ("", "/"):
+            continue
+
+        key = _classify_page(split.path, link.get("text", ""))
+        if key is None or key in selected:
+            continue
+        selected[key] = absolute
+    return selected
+
+
+def analyze_site(homepage_analysis, base_url, session=None,
+                 max_extra_pages=MAX_EXTRA_PAGES):
+    """Enrich a homepage analysis by following a handful of key internal links.
+
+    ``homepage_analysis`` is the dict returned by ``analyze_html`` for the
+    already-fetched homepage; ``base_url`` is its final (post-redirect) URL.
+
+    Backwards-compatible: every original homepage field is preserved untouched.
+    This only ADDS two keys:
+
+    * ``pages`` — a list of per-subpage analyses that were fetched successfully.
+    * ``site_inventory`` — fact flags (``has_pricing_page`` etc.) derived from
+      the homepage's own links, plus discovered/fetched counts.
+
+    The inventory flags are grounded in evidence (the homepage links to the
+    page), so they stay correct even if a subpage fetch is WAF-blocked. Each
+    subpage fetch is bounded by ``fetch_website_html``'s existing timeout and
+    size caps and soft-fails on its own — a broken subpage never fails the run.
+    """
+    enriched = dict(homepage_analysis)
+    candidates = _select_key_subpages(
+        homepage_analysis, base_url, max_extra_pages
+    )
+
+    # Flags reflect what the homepage actually links to (on-page evidence),
+    # independent of whether each subpage fetch then succeeds.
+    inventory = {f"has_{key}_page": (key in candidates) for key in KEY_PAGE_PATTERNS}
+
+    pages = []
+    for key, page_url in candidates.items():
+        try:
+            html, final_url = fetch_website_html(page_url, session=session)
+            page_analysis = analyze_html(html)
+        except Exception as exc:  # soft-fail: a bad subpage never breaks the run
+            logger.info("Subpage fetch skipped (%s): %s", page_url, exc)
+            continue
+        pages.append({
+            "category": key,
+            "url": final_url,
+            "path": urlsplit(final_url).path or "/",
+            "title": page_analysis.get("title", ""),
+            "meta_description": page_analysis.get("meta_description", ""),
+            "headings": page_analysis.get("headings", [])[:20],
+        })
+
+    enriched["pages"] = pages
+    enriched["site_inventory"] = {
+        **inventory,
+        "pages_discovered": len(candidates),
+        "pages_fetched": len(pages),
+    }
+    return enriched
