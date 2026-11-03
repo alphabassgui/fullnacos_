@@ -145,3 +145,59 @@ def test_generate_action_persistent_429_propagates(de, monkeypatch):
 
     with pytest.raises(RateLimitError):
         de.generate_action(OPPORTUNITY, ANALYSIS, business_id="biz-1")
+
+
+# ──────────────────────────────────────────────
+# github_connected signal (2b): the engine cannot see whether a repo is
+# connected, so generate_action surfaces it as a hard fact in the user prompt.
+# ──────────────────────────────────────────────
+
+
+def _capturing_client(content):
+    """A one-shot client that records the messages it was called with, so a
+    test can assert what the prompt actually carried."""
+    state = {"messages": None}
+
+    def create(*, model=None, messages=None, temperature=None, **kwargs):
+        state["messages"] = messages
+        return _Response(content)
+
+    return _Fake(chat=_Fake(completions=_Fake(create=create))), state
+
+
+def _user_prompt(state):
+    return next(
+        m["content"] for m in state["messages"] if m["role"] == "user"
+    )
+
+
+def test_prompt_states_github_connected_true(de, monkeypatch):
+    client, state = _capturing_client(json.dumps(VALID_ACTION))
+    monkeypatch.setattr(de, "client", client)
+
+    de.generate_action(
+        OPPORTUNITY, ANALYSIS, business_id="biz-1", github_connected=True
+    )
+
+    assert "GitHub repository connected: true" in _user_prompt(state)
+
+
+def test_prompt_states_github_connected_false(de, monkeypatch):
+    client, state = _capturing_client(json.dumps(VALID_ACTION))
+    monkeypatch.setattr(de, "client", client)
+
+    de.generate_action(
+        OPPORTUNITY, ANALYSIS, business_id="biz-1", github_connected=False
+    )
+
+    assert "GitHub repository connected: false" in _user_prompt(state)
+
+
+def test_github_connected_defaults_false(de, monkeypatch):
+    # Callers that predate the signal must still get the safe default.
+    client, state = _capturing_client(json.dumps(VALID_ACTION))
+    monkeypatch.setattr(de, "client", client)
+
+    de.generate_action(OPPORTUNITY, ANALYSIS, business_id="biz-1")
+
+    assert "GitHub repository connected: false" in _user_prompt(state)
