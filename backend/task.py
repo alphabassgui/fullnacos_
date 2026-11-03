@@ -23,7 +23,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from extensions import db as orm_db
 from models import AgentRun, GtmRun, Observation, get_business_row
-from website_analyzer import fetch_website_html, analyze_html
+from website_analyzer import fetch_website_html, analyze_html, analyze_site
 from services.execution_engine import execute_action
 
 logger = logging.getLogger(__name__)
@@ -187,6 +187,15 @@ def analyze_business_website(self, business_id, user_id, run_id):
 
         # Analyze HTML
         analysis = analyze_html(html)
+
+        # Follow a few key internal links (pricing/contact/about/services) so
+        # the opportunity generator judges the site on pages that exist instead
+        # of hallucinating gaps. Best-effort: enrichment degrading to
+        # homepage-only must never fail an otherwise-good run.
+        try:
+            analysis = analyze_site(analysis, final_url)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.warning("Multi-page enrichment skipped: %s", exc)
 
         # Save observation
         observation = {
