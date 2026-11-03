@@ -114,6 +114,7 @@ def generate_action(
     opportunity,
     business_analysis,
     business_id,
+    github_connected=False,
 ):
     """
     Generate a proposed action for a growth opportunity.
@@ -121,6 +122,11 @@ def generate_action(
     Historical learnings are provided to the model as additional
     context. This function does not execute anything.
     It only creates a proposed action for later approval.
+
+    ``github_connected`` is a hard fact the model cannot see for itself:
+    whether a GitHub repository is connected for this business. The prompt
+    only lets the engine choose ``action_type="github"`` when it is true, so
+    we never plan a code-level fix the picker/executor can't act on.
     """
 
     if not business_id:
@@ -133,6 +139,8 @@ def generate_action(
     )
 
     prompt = f"""
+GitHub repository connected: {str(bool(github_connected)).lower()}
+
 Business understanding:
 
 {json.dumps(

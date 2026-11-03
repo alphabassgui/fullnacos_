@@ -1,5 +1,6 @@
 from agent.decision_engine import generate_action
 from services.action_service import create_action
+from services.connection_service import get_connection
 
 from extensions import db
 from models import (
@@ -9,6 +10,27 @@ from models import (
     get_business_row,
     opportunity_to_dict,
 )
+
+
+def _github_repo_connected(business_id, owner_id):
+    """Whether a GitHub repository is connected for this business — the hard
+    fact the decision engine needs to decide if a code-level (github) action is
+    even possible. A github action with no connected repo would dead-end at
+    execution (``get_connection`` -> "GitHub connection not found"), so the
+    engine must not propose one; this is the signal that gates it.
+
+    A missing business/owner or any lookup error resolves to False — the safe
+    default is "no automated code edits available".
+    """
+    try:
+        connection = get_connection(
+            business_id=business_id,
+            user_id=owner_id,
+            provider="github",
+        )
+    except (ValueError, PermissionError):
+        return False
+    return bool(connection and connection.get("repository"))
 
 
 # generate_actions_for_opportunities skips an opportunity that already has an
@@ -64,10 +86,13 @@ def create_action_from_opportunity(
 
     opportunity = opportunity_to_dict(opportunity_row)
 
+    github_connected = _github_repo_connected(business_id, owner_id)
+
     decision = generate_action(
         opportunity=opportunity,
         business_analysis=business_analysis,
         business_id=business_id,
+        github_connected=github_connected,
     )
 
     action = create_action(

@@ -275,6 +275,27 @@ for a decision engine that only plans.
 - A target_path identifies the intended file; it does not authorize execution,
   publishing, merging, or deployment.
 
+CHOOSING action_type = "github" (code-level copy/metadata fixes):
+Some opportunities are fixable directly in the website's source code — but ONLY
+on-page copy and metadata: the page <title>, the meta description, Open Graph /
+Twitter card tags, visible heading or call-to-action wording, and image alt text.
+Those are the only changes a "github" action may cover at this stage.
+- A fact line "GitHub repository connected: true|false" is supplied at the top of
+  each opportunity. Treat it as ground truth about whether automated code edits are
+  even possible — never assume a repository exists when it says false.
+- When that fact is TRUE and the opportunity is essentially an on-page copy,
+  metadata, or SEO text change of the kind listed above, prefer
+  action_type = "github". Put a crisp, specific change intent in "description"
+  (what copy or metadata to change, and to what effect), and leave "target_path"
+  null unless a specific file is genuinely evidenced — the owner confirms the exact
+  file before approval, so guessing one is wrong, not helpful.
+- When that fact is FALSE, do NOT choose "github". Use the most appropriate of
+  "seo" / "content" / "website" instead, and add "a connected GitHub repository" to
+  "required_inputs" so the owner knows connecting one would enable an automated fix.
+- Structural, multi-file, logic, routing, styling, or layout changes are NEVER
+  "github" actions here — they are out of scope, so use another action_type or put
+  the need in "required_inputs".
+
 OUTPUT CONTRACT (strict):
 - Return a single JSON object with exactly these thirteen fields — no more, no fewer:
   action_title, action_type, objective, description, reasoning, expected_outcome,
