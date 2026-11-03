@@ -6,6 +6,8 @@ import uuid
 from task import execute_approved_action
 from validations import validate_website_url
 from extensions import db as orm_db
+from connectors.github_api import GitHubAPI
+from services.connection_service import get_connection
 from models import (
     Action,
     AgentRun,
@@ -1220,6 +1222,336 @@ def get_business_learnings(business_id):
         "learnings": learnings,
     }), 200
     
+
+# ─────────────────────────────────────────────────────────────
+# GitHub action file picker
+#
+# A planned github action may carry no target_path (the Decision Engine is
+# forbidden from guessing one) or a stale one. Before the owner can approve it,
+# they need to confirm which REAL file the grounded edit will touch. These two
+# routes do exactly that, on demand — nothing is cached on the action, so the
+# shortlist is always computed against the repository's current tree:
+#
+#   GET  …/actions/<id>/resolve-path   → {status, path | candidates}
+#   PATCH …/actions/<id>/target-path   → persists the owner's confirmed pick
+#
+# Both reuse approve_action's auth skeleton and the same connection→repo→branch
+# chain the connector uses at execution time. A path is only ever accepted when
+# it is confirmed to exist in the tree, server-side — the "a path that actually
+# exists" rule is enforced here, not trusted from the client.
+# ─────────────────────────────────────────────────────────────
+
+
+def _github_base_context(connection):
+    """Resolve a connected github connection to (github_api, owner, repo,
+    base_sha) for the repository's default branch — the same chain the
+    GitHubConnector builds at execution time.
+
+    Raises ValueError when no repository is selected or the default branch
+    cannot be read; the caller maps that to a 400.
+    """
+    repository = connection.get("repository")
+    if not repository:
+        raise ValueError("No GitHub repository selected")
+
+    owner, repo = repository.split("/", 1)
+
+    github = GitHubAPI(access_token=connection["access_token"])
+
+    github_repo = github.get_repository(owner=owner, repo=repo)
+
+    base = github.get_branch(
+        owner=owner,
+        repo=repo,
+        branch=github_repo["default_branch"],
+    )
+
+    if not base:
+        raise ValueError("Could not read the repository's default branch")
+
+    return github, owner, repo, base["sha"]
+
+
+@user_bp.route(
+    "/api/business/<business_id>/actions/<action_id>/resolve-path",
+    methods=["GET"],
+)
+def resolve_action_path(business_id, action_id):
+    user_id = session.get("user_id")
+
+    if not user_id:
+        return jsonify({
+            "success": False,
+            "error": "Authentication required",
+        }), 401
+
+    business = get_business_row(business_id)
+
+    if business is None:
+        return jsonify({
+            "success": False,
+            "error": "Business not found",
+        }), 404
+
+    if str(business.owner_id) != user_id:
+        return jsonify({
+            "success": False,
+            "error": "You do not have permission to modify this business",
+        }), 403
+
+    action_row = _get_child(Action, action_id, business_id)
+
+    if action_row is None:
+        return jsonify({
+            "success": False,
+            "error": "Action not found",
+        }), 404
+
+    if str(action_row.owner_id) != user_id:
+        return jsonify({
+            "success": False,
+            "error": "You do not have permission to modify this action",
+        }), 403
+
+    if action_row.action_type != "github":
+        return jsonify({
+            "success": False,
+            "error": "Action is not a GitHub action",
+        }), 400
+
+    try:
+        # Imported lazily: the grounded-edit service pulls in the Groq client,
+        # which must not be a hard import dependency of the app (see the
+        # connector, which imports it the same way at execution time).
+        from services.github_edit_service import resolve_target_file
+
+        connection = get_connection(
+            business_id=business_id,
+            user_id=user_id,
+            provider="github",
+        )
+
+        if not connection:
+            return jsonify({
+                "success": False,
+                "error": "GitHub connection not found",
+            }), 404
+
+        github, owner, repo, base_sha = _github_base_context(connection)
+
+        resolution = resolve_target_file(
+            github_api=github,
+            owner=owner,
+            repo=repo,
+            base_sha=base_sha,
+            evidenced_path=action_row.target_path,
+        )
+
+        response = {
+            "success": True,
+            "status": resolution["status"],
+            "evidenced_path": action_row.target_path,
+        }
+        if resolution["status"] == "confirmed":
+            response["path"] = resolution["path"]
+        else:
+            response["candidates"] = resolution.get("candidates", [])
+
+        return jsonify(response), 200
+
+    except PermissionError as exc:
+        return jsonify({
+            "success": False,
+            "error": str(exc),
+        }), 403
+
+    except ValueError as exc:
+        return jsonify({
+            "success": False,
+            "error": str(exc),
+        }), 400
+
+    except Exception as exc:
+        return jsonify({
+            "success": False,
+            "error": str(exc),
+        }), 500
+
+
+@user_bp.route(
+    "/api/business/<business_id>/actions/<action_id>/target-path",
+    methods=["PATCH"],
+)
+def set_action_target_path(business_id, action_id):
+    user_id = session.get("user_id")
+
+    if not user_id:
+        return jsonify({
+            "success": False,
+            "error": "Authentication required",
+        }), 401
+
+    business = get_business_row(business_id)
+
+    if business is None:
+        return jsonify({
+            "success": False,
+            "error": "Business not found",
+        }), 404
+
+    if str(business.owner_id) != user_id:
+        return jsonify({
+            "success": False,
+            "error": "You do not have permission to modify this business",
+        }), 403
+
+    action_row = _get_child(Action, action_id, business_id)
+
+    if action_row is None:
+        return jsonify({
+            "success": False,
+            "error": "Action not found",
+        }), 404
+
+    if str(action_row.owner_id) != user_id:
+        return jsonify({
+            "success": False,
+            "error": "You do not have permission to modify this action",
+        }), 403
+
+    if action_row.action_type != "github":
+        return jsonify({
+            "success": False,
+            "error": "Action is not a GitHub action",
+        }), 400
+
+    data = request.get_json(silent=True) or {}
+    chosen_path = data.get("target_path")
+
+    if not chosen_path or not str(chosen_path).strip():
+        return jsonify({
+            "success": False,
+            "error": "Missing target_path",
+        }), 400
+
+    chosen_path = str(chosen_path).strip()
+
+    # ---------------------------------------------------------
+    # Validate the chosen path against the repository's live tree BEFORE
+    # taking the row lock, so the network round-trip doesn't hold the lock.
+    # resolve_target_file only returns "confirmed" for a path that really
+    # exists in the tree, so this is the single source of truth for the
+    # "a path that actually exists" rule — the client's pick is never trusted.
+    # ---------------------------------------------------------
+    try:
+        from services.github_edit_service import resolve_target_file
+
+        connection = get_connection(
+            business_id=business_id,
+            user_id=user_id,
+            provider="github",
+        )
+
+        if not connection:
+            return jsonify({
+                "success": False,
+                "error": "GitHub connection not found",
+            }), 404
+
+        github, owner, repo, base_sha = _github_base_context(connection)
+
+        resolution = resolve_target_file(
+            github_api=github,
+            owner=owner,
+            repo=repo,
+            base_sha=base_sha,
+            evidenced_path=chosen_path,
+        )
+
+    except PermissionError as exc:
+        return jsonify({
+            "success": False,
+            "error": str(exc),
+        }), 403
+
+    except ValueError as exc:
+        return jsonify({
+            "success": False,
+            "error": str(exc),
+        }), 400
+
+    except Exception as exc:
+        return jsonify({
+            "success": False,
+            "error": str(exc),
+        }), 500
+
+    if resolution["status"] != "confirmed":
+        return jsonify({
+            "success": False,
+            "error": (
+                f"'{chosen_path}' was not found in the repository. "
+                "Choose a file that exists in the current tree."
+            ),
+            "status": resolution["status"],
+            "candidates": resolution.get("candidates", []),
+        }), 400
+
+    confirmed_path = resolution["path"]
+
+    # ---------------------------------------------------------
+    # Persist the pick under a row lock, and only while the action is still
+    # awaiting approval — once it's approved/running/done the target is locked
+    # in (its execution is already queued against it).
+    # ---------------------------------------------------------
+    try:
+        locked = (
+            orm_db.session.query(Action)
+            .filter_by(id=action_id)
+            .with_for_update()
+            .one_or_none()
+        )
+
+        if locked is None or str(locked.business_id) != str(business_id):
+            raise ValueError("Action not found")
+
+        if str(locked.owner_id) != user_id:
+            raise PermissionError(
+                "You do not have permission to modify this action"
+            )
+
+        if locked.status != "pending_approval":
+            raise ValueError(
+                "The target file can only be set while the action is "
+                "pending approval"
+            )
+
+        locked.target_path = confirmed_path
+        locked.updated_at = datetime.utcnow()
+
+        orm_db.session.commit()
+
+    except PermissionError as exc:
+        orm_db.session.rollback()
+        return jsonify({
+            "success": False,
+            "error": str(exc),
+        }), 403
+
+    except ValueError as exc:
+        orm_db.session.rollback()
+        return jsonify({
+            "success": False,
+            "error": str(exc),
+        }), 400
+
+    return jsonify({
+        "success": True,
+        "action_id": action_id,
+        "target_path": confirmed_path,
+        "status": "pending_approval",
+    }), 200
+
 
 # ─────────────────────────────────────────────────────────────
 # Auth-redirect stubs (targets of auth.py:login redirects)
