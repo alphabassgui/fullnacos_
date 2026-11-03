@@ -26,7 +26,7 @@
 - [Environment Variables](#environment-variables)
 - [Security Hardening](#security-hardening)
 - [Background Task Queue](#background-task-queue)
-- [Firestore Data Model](#firestore-data-model)
+- [Database Schema](#database-schema)
 
 ---
 
@@ -42,7 +42,7 @@ Blom is a **Flask-based AI backend** that acts as an autonomous growth-marketing
 6. **Executes** — writes files to GitHub, posts to Instagram, or updates web pages
 7. **Learns** — records measurements after execution and generates learnings that feed back into future decisions
 
-The entire pipeline is asynchronous, driven by [Celery](https://docs.celeryq.dev/) backed by Redis, with state persisted in Google Cloud Firestore.
+The entire pipeline is asynchronous, driven by [Celery](https://docs.celeryq.dev/) backed by Redis, with state persisted in Supabase (Postgres via SQLAlchemy).
 
 ---
 
@@ -59,8 +59,8 @@ The entire pipeline is asynchronous, driven by [Celery](https://docs.celeryq.dev
 │       └─────────────┴───────────────┴─────────────────┘          │
 │                              │                                    │
 │                    ┌─────────▼─────────┐                         │
-│                    │   Firebase Auth +  │                         │
-│                    │   Firestore DB     │                         │
+│                    │   Supabase         │                         │
+│                    │  (Postgres DB)     │                         │
 │                    └─────────┬─────────┘                         │
 │                              │                                    │
 │            ┌─────────────────▼─────────────────┐                 │
@@ -100,7 +100,7 @@ The full autonomous cycle is triggered by a single API call: `POST /api/business
 | **4. Opportunities** | `agent/opportunity_generator.py` → Groq LLM | Generates 0–5 ranked, evidence-grounded growth opportunities with `problem_key`, impact, and confidence score |
 | **5. Validate** | `agent/opportunity_validation.py` | Schema validates and deduplicates opportunities before persisting |
 | **6. Decide** | `agent/decision_engine.py` → Groq LLM | Converts each opportunity into a concrete action plan, informed by historical learnings |
-| **7. Await approval** | Firestore + REST API | Actions stored as `pending_approval`; user must explicitly approve via `POST /api/business/<id>/actions/<id>/approve` |
+| **7. Await approval** | Database + REST API | Actions stored as `pending_approval`; user must explicitly approve via `POST /api/business/<id>/actions/<id>/approve` |
 | **8. Execute** | `services/execution_engine.py` + Connectors | Runs the approved action through the appropriate connector |
 | **9. Measure** | `services/measurement_service.py` | Records success/failure metric against the execution |
 | **10. Learn** | `services/learning_service.py` → Groq LLM | Generates a structured learning from the measurement; stored for future decision cycles |
@@ -116,11 +116,11 @@ Located in `routes/auth.py` and `routes/auth_api.py`:
 - **Dual auth surface**: A server-rendered HTML flow (`/login`, `/register`) for web UI, plus a JSON API (`/api/auth/login`, `/api/auth/register`, `/api/auth/me`) for SPAs.
 - **CSRF protection**: Login form embeds a one-time HMAC-compared token (`_login_csrf`); constant-time comparison prevents timing attacks.
 - **IP-based brute-force protection**: Redis-first rate limiter with in-memory fallback. After 5 failed login attempts, the IP is locked out for 15 minutes. Registration is also capped at 3 accounts per IP per hour.
-- **Device binding**: On login, the user's `device_id` (JavaScript-generated) is stored in Firestore. Logins from unexpected devices trigger an audit log entry in `security_logs`.
-- **Session token rotation**: A new cryptographic session token is generated on every login and stored in Firestore. Logging in from another device invalidates all previous sessions immediately.
+- **Device binding**: On login, the user's `device_id` (JavaScript-generated) is stored in the database. Logins from unexpected devices trigger an audit log entry in `security_logs`.
+- **Session token rotation**: A new cryptographic session token is generated on every login and stored in the database. Logging in from another device invalidates all previous sessions immediately.
 - **Session hardening**: Cookies are `HttpOnly`, `SameSite=Lax`, and `Secure` in production. Sessions are 30-minute rolling, with no-cache headers on every response.
 - **Password security**: Passwords are hashed with Werkzeug (bcrypt-derived). Minimum 8-character policy enforced.
-- **`login_required` decorator** (`decorators.py`): Verifies session token against Firestore on every protected request.
+- **`login_required` decorator** (`decorators.py`): Verifies session token against the database on every protected request.
 
 ---
 
@@ -207,7 +207,7 @@ The output schema has 13 required fields including `action_type` (one of `websit
 | `/api/business/<id>/actions/<action_id>/reject` | POST | Reject action |
 | `/api/business/<id>/executions/<execution_id>` | GET | Poll execution status |
 
-The **approve endpoint** uses a Firestore transaction to guarantee idempotency: if already approved, the existing `execution_id` is returned without creating a duplicate. Only `pending_approval` actions can be approved; only `approved` actions can execute.
+The **approve endpoint** uses a database transaction to guarantee idempotency: if already approved, the existing `execution_id` is returned without creating a duplicate. Only `pending_approval` actions can be approved; only `approved` actions can execute.
 
 On approval, an `executions/<execution_id>` document is created (`status: queued`) and `execute_approved_action.delay()` is dispatched to Celery.
 
@@ -241,7 +241,7 @@ All connectors live in `connectors/` and implement a `BaseConnector.execute()` i
 
 After every successful execution:
 
-1. `measurement_service.record_measurement()` creates a document in `businesses/<id>/measurements/` with `metric: execution_success`, `value: 1`, `source: execution_engine`.
+1. `measurement_service.record_measurement()` writes a measurement record with `metric: execution_success`, `value: 1`, `source: execution_engine`.
 
 2. `learning_service.create_learning_from_measurement()` calls `agent/learning_generator.py` (Groq LLM) to synthesise a structured learning:
    ```json
@@ -256,7 +256,7 @@ After every successful execution:
    }
    ```
 
-3. Learnings are stored with `measurement_id` as the document ID, making the operation **idempotent** via a Firestore transaction (won't create duplicates if retried).
+3. Learnings are stored with `measurement_id` as the key, making the operation **idempotent** via a database transaction (won't create duplicates if retried).
 
 4. Future decision engine calls fetch up to 20 recent learnings, closing the feedback loop.
 
@@ -270,7 +270,7 @@ Routes in `routes/github_connections.py`:
 | Endpoint | Description |
 |----------|-------------|
 | `GET /api/connections/github/connect?business_id=` | Initiates OAuth; generates PKCE-style `state`, redirects to GitHub |
-| `GET /api/connections/github/callback` | Exchanges `code` for token, fetches account info, creates connection in Firestore |
+| `GET /api/connections/github/callback` | Exchanges `code` for token, fetches account info, creates connection in the database |
 | `GET /api/connections/github/repositories?business_id=` | Lists repos accessible by the connected account |
 | `PATCH /api/connections/github/repository?business_id=` | Selects a repo + captures `default_branch` |
 
@@ -294,8 +294,7 @@ Required scopes: `instagram_business_basic`, `instagram_business_content_publish
 | Layer | Technology |
 |-------|-----------|
 | **Web Framework** | Flask 3.1 |
-| **Database** | Google Cloud Firestore (NoSQL, real-time) |
-| **Auth Provider** | Firebase Admin SDK |
+| **Database** | Supabase (Postgres, via SQLAlchemy + Flask-Migrate/Alembic) |
 | **Task Queue** | Celery 5.6 |
 | **Broker / Cache** | Redis 8 |
 | **LLM Provider** | Groq API (Llama 3.3 70B / configurable model) |
@@ -457,7 +456,7 @@ backend/
 
 - Python 3.11+
 - Redis (running on `localhost:6379`)
-- A Firebase project with Firestore enabled and a service account key
+- A Supabase Postgres database (connection string in `DATABASE_URL`)
 - A Groq API key
 - (Optional) GitHub OAuth App credentials
 - (Optional) Instagram App credentials
@@ -510,7 +509,9 @@ gunicorn -w 4 -b 0.0.0.0:8000 "app:app"
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `SECRET_KEY` | ✅ | Flask session secret — use a long random string in production |
-| `FIREBASE_CREDENTIALS` | ✅ | Absolute path to Firebase service account JSON |
+| `DATABASE_URL` | ✅ | Supabase Postgres connection string (SQLAlchemy + Flask-Migrate). App boots DB-less if unset. |
+| `TAVILY_API_KEY` | — | Tavily search API key for GTM competitor discovery. GTM still runs if unset; discovery returns no competitors. |
+| `TEST_DATABASE_URL` | — | Separate throwaway Postgres URL for pytest's DB-backed tests; keep off production. |
 | `GROQ_API_KEY` | ✅ | Groq API key for LLM calls |
 | `GROQ_MODEL` | — | Groq model ID (default: `llama-3.3-70b-versatile`) |
 | `REDIS_URL` | — | Redis connection URL (default: `redis://localhost:6379/0`) |
@@ -531,7 +532,7 @@ gunicorn -w 4 -b 0.0.0.0:8000 "app:app"
 | `SUPABASE_SERVICE_KEY` | — | Supabase `service_role` key (SECRET — never log or commit) used to upload tiles |
 | `SUPABASE_TILES_BUCKET` | — | Supabase Storage bucket name for tiles; the bucket must be **public-read** so the screenshots serve directly |
 
-> ⚠️ **Never commit `.env` or the Firebase service account JSON to version control.**
+> ⚠️ **Never commit `.env` or any credentials to version control.**
 
 ---
 
@@ -543,7 +544,7 @@ gunicorn -w 4 -b 0.0.0.0:8000 "app:app"
 | Prompt injection | System prompts explicitly instruct LLM to treat scraped content as data, not instructions; content is XML-tagged to separate user data from instructions |
 | Brute force | Redis-backed IP lockout (5 attempts → 15 min lockout), registration throttle (3/hour/IP), in-memory fallback |
 | CSRF | One-time HMAC token on login form, constant-time comparison |
-| Session hijacking | Session token stored in Firestore; new token on every login invalidates previous sessions; `HttpOnly`, `SameSite=Lax` cookies |
+| Session hijacking | Session token stored in the database; new token on every login invalidates previous sessions; `HttpOnly`, `SameSite=Lax` cookies |
 | OAuth state forgery | `secrets.compare_digest` validation of OAuth state parameter |
 | Destructive GitHub writes | Line count and deletion-ratio safety checks before any file update |
 | Path traversal | GitHub `target_path` validated: no leading `/`, no `..` components |
@@ -571,7 +572,7 @@ celery -A task flower  # Flower web UI at localhost:5555
 
 ---
 
-## Firestore Data Model
+## Database Schema
 
 ```
 users/{uid}
@@ -615,4 +616,4 @@ security_logs/{log_id}
 
 ---
 
-*Built with Flask · Celery · Firestore · Redis · Groq*
+*Built with Flask · Celery · Supabase (Postgres) · Redis · Groq*
