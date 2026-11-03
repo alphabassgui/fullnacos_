@@ -316,6 +316,66 @@ def test_select_github_repository_updates_row_by_id(db_session, client):
     assert updated.updated_at == original_updated_at
 
 
+def test_github_repositories_echoes_saved_selection(db_session, client):
+    # The persisted repo choice must come back on GET /repositories so the UI can
+    # restore it on reload (the bug: selection was saved but never read back, so
+    # returning to the page showed nothing picked).
+    user = seed_user(db_session, "ghsel@test.test")
+    biz = seed_business(db_session, owner_id=user.id, name="GHSelBiz")
+    conn = seed_connection(
+        db_session, business_id=biz.id, provider="github", account_id="octocat",
+    )
+    conn.repository = "octocat/Hello-World"
+    conn.default_branch = "main"
+    db_session.commit()
+
+    with client.session_transaction() as sess:
+        sess["user_id"] = str(user.id)
+
+    with patch("routes.github_connections.GitHubAPI") as MockGitHubAPI:
+        mock_instance = MagicMock()
+        mock_instance.list_repositories.return_value = [
+            {"full_name": "octocat/Hello-World", "default_branch": "main"},
+            {"full_name": "octocat/other", "default_branch": "main"},
+        ]
+        MockGitHubAPI.return_value = mock_instance
+
+        resp = client.get(
+            f"/api/connections/github/repositories?business_id={biz.id}"
+        )
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["success"] is True
+    assert data["selected_repository"] == "octocat/Hello-World"
+    assert data["selected_default_branch"] == "main"
+
+
+def test_github_repositories_selection_null_when_none_chosen(db_session, client):
+    # A connected-but-not-yet-picked connection reports no selection (not a stale one).
+    user = seed_user(db_session, "ghnosel@test.test")
+    biz = seed_business(db_session, owner_id=user.id, name="GHNoSelBiz")
+    seed_connection(
+        db_session, business_id=biz.id, provider="github", account_id="octocat",
+    )
+
+    with client.session_transaction() as sess:
+        sess["user_id"] = str(user.id)
+
+    with patch("routes.github_connections.GitHubAPI") as MockGitHubAPI:
+        mock_instance = MagicMock()
+        mock_instance.list_repositories.return_value = []
+        MockGitHubAPI.return_value = mock_instance
+
+        resp = client.get(
+            f"/api/connections/github/repositories?business_id={biz.id}"
+        )
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["selected_repository"] is None
+
+
 # ---------------------------------------------------------------------------
 # Route: select_search_console_property (POST) — bumps updated_at
 # ---------------------------------------------------------------------------
