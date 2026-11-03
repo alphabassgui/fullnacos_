@@ -14,6 +14,8 @@ import {
   listActions,
   approveAction,
   rejectAction,
+  resolveActionPath,
+  setActionTargetPath,
   getExecution,
   getOpportunities,
   executionOutcome,
@@ -297,12 +299,14 @@ function Controls({
   onReject,
   onRetry,
   busy,
+  approveDisabled,
 }: {
   status: DraftStatus;
   onApprove: () => void;
   onReject: () => void;
   onRetry: () => void;
   busy: boolean;
+  approveDisabled?: boolean;
 }) {
   const note = (text: string) => (
     <span style={{ fontFamily: BODY, fontSize: 13, lineHeight: "18px", color: C.muted, textWrap: "pretty" }}>{text}</span>
@@ -310,7 +314,7 @@ function Controls({
   if (status === "pending_approval") {
     return (
       <>
-        <Btn kind="primary" onClick={onApprove} disabled={busy}>
+        <Btn kind="primary" onClick={onApprove} disabled={busy || approveDisabled}>
           Approve
         </Btn>
         <Btn kind="secondary" onClick={onReject} disabled={busy}>
@@ -354,6 +358,8 @@ function ActionCard({
   onReject,
   onRetry,
   busy,
+  picker,
+  approveDisabled,
 }: {
   action: FlaskAction;
   status: DraftStatus;
@@ -364,6 +370,8 @@ function ActionCard({
   onReject: () => void;
   onRetry: () => void;
   busy: boolean;
+  picker?: ReactNode;
+  approveDisabled?: boolean;
 }) {
   return (
     <article
@@ -430,10 +438,17 @@ function ActionCard({
         </div>
       </div>
 
+      {picker && (
+        <>
+          <div style={{ height: 1, background: C.border }} />
+          {picker}
+        </>
+      )}
+
       <div style={{ height: 1, background: C.border }} />
 
       <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
-        <Controls status={status} onApprove={onApprove} onReject={onReject} onRetry={onRetry} busy={busy} />
+        <Controls status={status} onApprove={onApprove} onReject={onReject} onRetry={onRetry} busy={busy} approveDisabled={approveDisabled} />
       </div>
     </article>
   );
@@ -641,6 +656,18 @@ function FlaskDraftInner({ businessId, opportunityId }: { businessId: string; op
   // Bumped to re-run the whole action fetch (e.g. a manual refetch on missing).
   const [refetch, setRefetch] = useState(0);
 
+  // GitHub file picker. A github action whose target_path isn't set yet can't be
+  // approved until the owner confirms a real file; these drive that sub-flow.
+  const [pathPhase, setPathPhase] = useState<"idle" | "loading" | "ready" | "none" | "error">("idle");
+  const [candidates, setCandidates] = useState<string[]>([]);
+  const [selectedPath, setSelectedPath] = useState<string>("");
+  const [pathError, setPathError] = useState<string>("");
+  // Bumped to re-run the resolve (manual retry after an error).
+  const [resolveNonce, setResolveNonce] = useState(0);
+
+  const targetPath = action && typeof action.target_path === "string" ? action.target_path : "";
+  const needsFile = !!action && action.action_type === "github" && !targetPath;
+
   // Normalize a backend status string to a DraftStatus the UI renders.
   const toDraftStatus = (s: string): DraftStatus => {
     const v = typeof s === "string" ? s.trim().toLowerCase() : "";
@@ -673,6 +700,13 @@ function FlaskDraftInner({ businessId, opportunityId }: { businessId: string; op
         const found = Array.isArray(list) ? list.find((a) => a.opportunity_id === opportunityId) : undefined;
         if (found) {
           setAction(found);
+          // If it's a github action with no file chosen yet, show the picker in
+          // its loading state while the resolve effect fetches candidates.
+          const foundTarget = typeof found.target_path === "string" ? found.target_path : "";
+          if (found.action_type === "github" && !foundTarget) {
+            setPathPhase("loading");
+            setPathError("");
+          }
           const draft = toDraftStatus(found.status);
           setStatus(draft);
           // Resume a run already in progress using the stored execution id.
@@ -700,6 +734,39 @@ function FlaskDraftInner({ businessId, opportunityId }: { businessId: string; op
       if (timer) clearTimeout(timer);
     };
   }, [businessId, opportunityId, refetch]);
+
+  // When the loaded action is a github action with no file chosen yet, resolve
+  // the candidate files against the repo's current tree so the owner can pick
+  // one. This screen shows a single action, so it's one request, not a fan-out.
+  useEffect(() => {
+    if (!needsFile || !action) return;
+    let active = true;
+    resolveActionPath(businessId, action.id).then((result) => {
+      if (!active) return;
+      const data =
+        result.data && typeof result.data === "object"
+          ? (result.data as { status?: string; candidates?: unknown })
+          : null;
+      if (!result.ok || !data) {
+        setPathError(errText(result.data) || "I couldn't read the files in your repository.");
+        setPathPhase("error");
+        return;
+      }
+      const cands = Array.isArray(data.candidates)
+        ? data.candidates.filter((c): c is string => typeof c === "string")
+        : [];
+      if (!cands.length) {
+        setPathPhase("none");
+        return;
+      }
+      setCandidates(cands);
+      setSelectedPath((prev) => (prev && cands.includes(prev) ? prev : cands[0]));
+      setPathPhase("ready");
+    });
+    return () => {
+      active = false;
+    };
+  }, [needsFile, action, businessId, resolveNonce]);
 
   // Resolve the parent opportunity title for context (non-blocking).
   useEffect(() => {
@@ -797,6 +864,34 @@ function FlaskDraftInner({ businessId, opportunityId }: { businessId: string; op
     });
   }, [action, businessId, busy, router]);
 
+  // Persist the owner's chosen file. The backend re-validates it against the live
+  // tree, so only a real path is accepted; on success we refetch the action so its
+  // target_path (and the now-unlocked Approve) reflect the pick.
+  const confirmPath = useCallback(
+    (path: string) => {
+      if (!action || busy || !path) return;
+      setBusy(true);
+      setPathError("");
+      setActionTargetPath(businessId, action.id, path).then((result) => {
+        setBusy(false);
+        if (!result.ok) {
+          setPathError(errText(result.data) || "I couldn't set that file. Pick one that exists in your repository.");
+          return;
+        }
+        setPathPhase("idle");
+        setFetchPhase("loading");
+        setRefetch((n) => n + 1);
+      });
+    },
+    [action, businessId, busy],
+  );
+
+  const retryResolve = useCallback(() => {
+    setPathPhase("loading");
+    setPathError("");
+    setResolveNonce((n) => n + 1);
+  }, []);
+
   if (fetchPhase === "loading") {
     return (
       <CenteredNote>
@@ -866,6 +961,66 @@ function FlaskDraftInner({ businessId, opportunityId }: { businessId: string; op
       ? "This run is already in progress. It runs in the background, so you can leave the page and come back."
       : RUNNING_BODY;
 
+  // GitHub file picker: shown only while a github action is awaiting approval and
+  // has no file chosen yet. Approve stays locked until the owner confirms one.
+  const filePicker: ReactNode =
+    status === "pending_approval" && needsFile ? (
+      <Section label="Which file should I fix?">
+        {pathPhase === "loading" && <Body>Reading the files in your repository…</Body>}
+        {pathPhase === "none" && (
+          <Body>I couldn&apos;t find an editable page or metadata file in your connected repository.</Body>
+        )}
+        {pathPhase === "error" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12, alignItems: "flex-start" }}>
+            <Body ink={C.bad}>{pathError || "I couldn't read the files in your repository."}</Body>
+            <Btn kind="secondary" onClick={retryResolve} disabled={busy}>
+              Try again
+            </Btn>
+          </div>
+        )}
+        {pathPhase === "ready" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 14, minWidth: 0 }}>
+            <Body>
+              Pick the file whose copy or metadata I should edit. I only propose the change as a pull
+              request, so nothing goes live until you review and merge it.
+            </Body>
+            <select
+              aria-label="File to fix"
+              value={selectedPath}
+              onChange={(e) => setSelectedPath(e.target.value)}
+              disabled={busy}
+              className="groville-focus"
+              style={{
+                width: "100%",
+                maxWidth: 520,
+                minHeight: 44,
+                padding: "10px 12px",
+                borderRadius: 10,
+                border: "1px solid " + C.border,
+                background: C.s2,
+                color: C.text,
+                fontFamily: BODY,
+                fontSize: 14,
+                lineHeight: "20px",
+              }}
+            >
+              {candidates.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+            {pathError && <Body ink={C.bad}>{pathError}</Body>}
+            <div>
+              <Btn kind="primary" onClick={() => confirmPath(selectedPath)} disabled={busy || !selectedPath}>
+                Confirm file
+              </Btn>
+            </div>
+          </div>
+        )}
+      </Section>
+    ) : null;
+
   return (
     <Board>
       <Header oppTitle={oppTitle} />
@@ -880,6 +1035,8 @@ function FlaskDraftInner({ businessId, opportunityId }: { businessId: string; op
         onReject={reject}
         onRetry={approve}
         busy={busy}
+        picker={filePicker}
+        approveDisabled={needsFile}
       />
     </Board>
   );
