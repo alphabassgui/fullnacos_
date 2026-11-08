@@ -140,7 +140,7 @@ def test_execute_generates_content_when_absent(github_offline, monkeypatch):
         seen["resolved"] = evidenced_path
         return {"status": "confirmed", "path": evidenced_path}
 
-    def fake_generate(path, original_content, action):
+    def fake_generate(path, original_content, action, **kwargs):
         seen["generated_from"] = original_content
         return {
             "content": original_content.replace("Old title", "New title"),
