@@ -179,9 +179,14 @@ def _change_intent(action):
     return "\n".join(parts)
 
 
-def generate_grounded_edit(path, original_content, action):
+def generate_grounded_edit(path, original_content, action, sibling_paths=None):
     """Produce the full new file contents for ``path`` with the action's safe
     copy/meta change applied to the *real* current contents.
+
+    ``sibling_paths`` is an optional list of other file paths in the same
+    directory (or closely related). When provided, the model sees the project
+    structure so it can make edits that fit the existing code conventions
+    (e.g. knowing the site also has .js/.tsx files alongside .html).
 
     Raises ValueError if the model declines the change or produces nothing
     usable — the caller turns that into a cleanly failed execution rather than
@@ -192,9 +197,26 @@ def generate_grounded_edit(path, original_content, action):
 
     intent = _change_intent(action)
 
+    # Build structure context so the model understands how the file fits
+    # into the overall project (HTML + JS + CSS files together, etc.).
+    structure_note = ""
+    if sibling_paths:
+        siblings = [p for p in sibling_paths if p != path][:20]
+        if siblings:
+            structure_note = (
+                f"\nProject structure — other files in this area:\n"
+                + "\n".join(f"  {p}" for p in siblings)
+                + "\n\nBe aware of how this file relates to its neighbors. "
+                "If the file imports or references JS/TS modules, components, "
+                "or stylesheets, preserve those relationships. Only edit the "
+                "copy/metadata in THIS file — do not change imports, component "
+                "names, or script references.\n"
+            )
+
     user_prompt = (
         f"File path: {path}\n\n"
         f"Requested change:\n{intent}\n\n"
+        f"{structure_note}"
         f"Current file contents:\n"
         f"-----8<----- BEGIN FILE -----8<-----\n"
         f"{original_content}\n"
@@ -203,7 +225,7 @@ def generate_grounded_edit(path, original_content, action):
 
     response = create_chat_completion(
         client,
-        model_kind="text",
+        model_kind="code",
         messages=[
             {"role": "system", "content": GROUNDED_EDIT_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
