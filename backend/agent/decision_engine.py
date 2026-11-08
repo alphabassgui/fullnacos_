@@ -215,6 +215,17 @@ analysis and opportunity evidence.
             "Groq returned invalid action JSON"
         ) from exc
 
-    return validate_action(action)
+    action = validate_action(action)
+
+    # ── Deterministic override ──────────────────────────────────────
+    # The LLM prompt says copy / metadata / SEO-text changes MUST be
+    # "github" when a repo is connected, but models sometimes ignore
+    # that.  Rather than rely solely on the prompt, enforce it here:
+    # if the repo IS connected and the model chose one of the
+    # non-write action types that cover the same surface area, flip
+    # it to "github" so the connector pipeline can actually apply it.
+    _GITHUB_ELIGIBLE_TYPES = {"website", "seo", "content"}
+    if github_connected and action["action_type"] in _GITHUB_ELIGIBLE_TYPES:
+        action["action_type"] = "github"
 
     return action
