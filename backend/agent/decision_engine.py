@@ -177,43 +177,65 @@ current opportunity, but still consider the current business
 analysis and opportunity evidence.
 """
 
-    response = create_chat_completion(
-        client,
-        model_kind="text",
-        messages=[
-            {
-                "role": "system",
-                "content": DECISION_ENGINE_SYSTEM_PROMPT,
-            },
-            {
-                "role": "user",
-                "content": prompt,
-            },
-        ],
-        temperature=0.2,
-    )
+    messages = [
+        {
+            "role": "system",
+            "content": DECISION_ENGINE_SYSTEM_PROMPT,
+        },
+        {
+            "role": "user",
+            "content": prompt,
+        },
+    ]
 
-    result = response.choices[0].message.content
+    # Retry up to 2 extra times on empty / non-JSON responses.
+    # Groq occasionally returns 200 OK with an empty body or a
+    # reasoning-only response that contains no JSON.
+    _MAX_PARSE_RETRIES = 3
+    last_parse_error = None
 
-    result = result.strip()
+    for _attempt in range(_MAX_PARSE_RETRIES):
+        response = create_chat_completion(
+            client,
+            model_kind="text",
+            messages=messages,
+            temperature=0.2,
+        )
 
-    if result.startswith("```"):
-        lines = result.splitlines()
+        result = response.choices[0].message.content
 
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
+        if not result or not result.strip():
+            last_parse_error = ValueError(
+                "Groq returned an empty response"
+            )
+            continue
 
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
+        result = result.strip()
 
-        result = "\n".join(lines).strip()
+        if result.startswith("```"):
+            lines = result.splitlines()
 
-    try:
-        action = json.loads(result)
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            "Groq returned invalid action JSON"
-        ) from exc
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+
+            result = "\n".join(lines).strip()
+
+        try:
+            action = json.loads(result)
+            last_parse_error = None
+            break
+        except json.JSONDecodeError as exc:
+            last_parse_error = ValueError(
+                f"Groq returned invalid action JSON: {result[:200]}"
+            )
+            last_parse_error.__cause__ = exc
+            continue
+
+    if last_parse_error is not None:
+        raise last_parse_error
 
     action = validate_action(action)
 
