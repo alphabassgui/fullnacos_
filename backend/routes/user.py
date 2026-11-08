@@ -635,6 +635,33 @@ def approve_action(business_id, action_id):
                     else str(locked.execution_id)
                 ),
             }
+        elif current_status == "failed":
+            # Allow retrying a failed action: reset it, create a fresh
+            # execution, and let the worker pick it up again.
+            now = datetime.utcnow()
+
+            execution = Execution(
+                business_id=business_id,
+                owner_id=user_id,
+                action_id=action_id,
+                status="queued",
+                created_at=now,
+                updated_at=now,
+            )
+            orm_db.session.add(execution)
+            orm_db.session.flush()
+
+            locked.status = "approved"
+            locked.approved_at = now
+            locked.approved_by = user_id
+            locked.execution_id = execution.id
+            locked.updated_at = now
+
+            result = {
+                "already_approved": False,
+                "execution_id": str(execution.id),
+                "retried": True,
+            }
         elif current_status != "pending_approval":
             raise ValueError("Only pending actions can be approved")
         else:
