@@ -170,6 +170,8 @@ class GitHubConnector(BaseConnector):
                 "Could not read the repository's default branch"
             )
 
+        from services.github_edit_service import _tree_blob_paths
+
         resolution = resolve_target_file(
             github_api=github,
             owner=owner,
@@ -191,18 +193,33 @@ class GitHubConnector(BaseConnector):
                 "and no editable page or metadata files were found to suggest."
             )
 
+        confirmed_path = resolution["path"]
+
         file_data = github.get_file(
             owner=owner,
             repo=repo,
-            path=resolution["path"],
+            path=confirmed_path,
             ref=default_branch,
         )
         original_content = base64.b64decode(
             file_data["content"]
         ).decode("utf-8")
 
+        # Gather sibling file paths so the model understands the project
+        # structure (e.g. that .html lives alongside .js/.css files).
+        try:
+            all_paths = _tree_blob_paths(github, owner, repo, base["sha"])
+            target_dir = "/".join(confirmed_path.split("/")[:-1])
+            sibling_paths = [
+                p for p in all_paths
+                if "/".join(p.split("/")[:-1]) == target_dir
+            ]
+        except Exception:
+            sibling_paths = None
+
         edit = generate_grounded_edit(
-            resolution["path"], original_content, action,
+            confirmed_path, original_content, action,
+            sibling_paths=sibling_paths,
         )
         return edit["content"], edit["summary"]
 
