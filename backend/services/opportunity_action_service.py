@@ -151,6 +151,11 @@ def generate_actions_for_opportunities(
             if opportunity_row is not None:
                 opportunity_rows.append(opportunity_row)
 
+    github_connected = _github_repo_connected(business_id, owner_id)
+
+    # Action types that should have been "github" when a repo is connected.
+    _MISROUTED_TYPES = {"website", "seo", "content"}
+
     created_actions = []
     existing_actions = []
 
@@ -165,8 +170,22 @@ def generate_actions_for_opportunities(
             .all()
         ):
             if action_row.status in _SKIP_REGENERATE_STATUSES:
-                existing_action = action_to_dict(action_row)
-                break
+                # Allow regeneration of completed actions that were
+                # misrouted (tagged website/seo/content when a GitHub
+                # repo is now connected).  Mark the old one superseded
+                # so a fresh "github" action can be created.
+                if (
+                    github_connected
+                    and action_row.status == "completed"
+                    and action_row.action_type in _MISROUTED_TYPES
+                ):
+                    action_row.status = "superseded"
+                    db.session.add(action_row)
+                    db.session.flush()
+                    # fall through to create a new action
+                else:
+                    existing_action = action_to_dict(action_row)
+                    break
 
         if existing_action:
             existing_actions.append(existing_action)
