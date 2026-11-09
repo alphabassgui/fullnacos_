@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Icons } from "@/components/ds";
 import { C, DISPLAY, BODY, MONO_EYEBROW, DashboardShell } from "./shell";
+import { ConnectionsSkeleton } from "./Skeletons";
 import { InfoTip } from "@/components/ui/tooltip";
 import { useIsMobile } from "./use-media-query";
 import { useBusiness } from "@/lib/use-business";
@@ -1829,14 +1830,17 @@ function ConnectionsBody() {
     return () => clearTimeout(t);
   }, [toast]);
 
+  // While the business/auth resolves, show the full page skeleton (matches the
+  // other dashboards) instead of partial loading cards.
+  if (business.status === "loading") {
+    return <ConnectionsSkeleton />;
+  }
+
   // The business card renders ONLY for a real, ready business (not demo / none / loading).
   let businessCard: ReactNode = null;
   let gscCard: ReactNode;
   let githubCard: ReactNode;
-  if (business.status === "loading") {
-    gscCard = <GscCard state="loading" body={<p style={NOTE_STYLE}>Loading your dashboard…</p>} m={m} />;
-    githubCard = <GithubCard state="loading" body={<p style={NOTE_STYLE}>Loading your dashboard…</p>} m={m} />;
-  } else if (business.status === "ready" && business.businessId && business.business) {
+  if (business.status === "ready" && business.businessId && business.business) {
     businessCard = <BusinessConnection key={`biz-${business.businessId}`} business={business.business} showToast={showToast} />;
     gscCard = <SearchConsoleConnection key={`gsc-${business.businessId}`} businessId={business.businessId} showToast={showToast} />;
     githubCard = <GithubConnection key={`gh-${business.businessId}`} businessId={business.businessId} showToast={showToast} />;

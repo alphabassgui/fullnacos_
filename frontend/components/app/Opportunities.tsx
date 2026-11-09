@@ -27,6 +27,7 @@ import {
 } from "./opportunities-data";
 import { STEPS, StepRow } from "./Analysing";
 import { OpportunitiesEmptyState } from "./OpportunitiesEmptyState";
+import { OpportunitiesSkeleton } from "./Skeletons";
 
 /**
  * Opportunities — the anchor dashboard, ported pixel-for-pixel from the Claude
@@ -898,13 +899,9 @@ const retryButton: CSSProperties = {
   cursor: "pointer",
 };
 
-/** Brief placeholder while the current business resolves (avoids flashing mock data). */
+/** Skeleton placeholder while the current business resolves (avoids flashing mock data). */
 function LoadingState() {
-  return (
-    <main style={{ flex: 1, overflowY: "auto", background: C.bg, display: "flex" }}>
-      <span style={{ margin: "auto", fontSize: 14, color: C.muted }}>Loading your dashboard…</span>
-    </main>
-  );
+  return <OpportunitiesSkeleton />;
 }
 
 /**

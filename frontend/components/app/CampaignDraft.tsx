@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Icons } from "@/components/ds";
 import { C, DISPLAY, BODY, MONO_EYEBROW, DashboardShell, Chip } from "./shell";
+import { CampaignDraftSkeleton } from "./Skeletons";
 import { InfoTip } from "@/components/ui/tooltip";
 import { useIsMobile, usePrefersReducedMotion } from "./use-media-query";
 import { useBusiness } from "@/lib/use-business";
@@ -1047,11 +1048,7 @@ function FlaskDraft({ opportunityId }: { opportunityId: string }) {
   const business = useBusiness();
 
   if (business.status === "loading") {
-    return (
-      <CenteredNote>
-        <span style={{ fontSize: 14, color: C.muted }}>Loading your dashboard…</span>
-      </CenteredNote>
-    );
+    return <CampaignDraftSkeleton />;
   }
 
   if (business.status === "none" || !business.businessId) {
