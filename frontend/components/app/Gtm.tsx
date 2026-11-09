@@ -5,6 +5,7 @@ import type { CSSProperties, ReactNode } from "react";
 import Link from "next/link";
 import { Icons } from "@/components/ds";
 import { C, DISPLAY, BODY, MONO_EYEBROW, DashboardShell } from "./shell";
+import { GtmSkeleton } from "./Skeletons";
 import { useIsMobile, usePrefersReducedMotion } from "./use-media-query";
 import { useBusiness } from "@/lib/use-business";
 import { StepRow } from "./Analysing";
@@ -1129,11 +1130,7 @@ export function GtmScreen() {
 
   let body: ReactNode;
   if (business.status === "loading") {
-    body = (
-      <CenteredNote>
-        <span style={{ fontSize: 14, color: C.muted }}>Loading your dashboard…</span>
-      </CenteredNote>
-    );
+    body = <GtmSkeleton />;
   } else if (business.status === "demo") {
     body = (
       <CenteredNote>

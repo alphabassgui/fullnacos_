@@ -5,6 +5,7 @@ import type { CSSProperties, ReactNode } from "react";
 import Link from "next/link";
 import { Icons } from "@/components/ds";
 import { C, DISPLAY, BODY, DashboardShell, Chip } from "./shell";
+import { ResultsSkeleton } from "./Skeletons";
 import { InfoTip } from "@/components/ui/tooltip";
 import { useIsMobile } from "./use-media-query";
 import { useBusiness } from "@/lib/use-business";
@@ -659,11 +660,7 @@ export function ResultsScreen() {
       </Board>
     );
   } else if (business.status === "loading") {
-    body = (
-      <Board m={m}>
-        <LoadingState />
-      </Board>
-    );
+    body = <ResultsSkeleton />;
   } else if (business.status === "ready" && business.businessId) {
     body = <RealResults businessId={business.businessId} />;
   } else {

@@ -5,6 +5,7 @@ import type { CSSProperties, ReactNode } from "react";
 import Link from "next/link";
 import { Icons } from "@/components/ds";
 import { C, DISPLAY, BODY, MONO_EYEBROW, DashboardShell, Chip } from "./shell";
+import { CampaignsSkeleton } from "./Skeletons";
 import { InfoTip } from "@/components/ui/tooltip";
 import { useIsMobile } from "./use-media-query";
 import { useBusiness } from "@/lib/use-business";
@@ -358,11 +359,7 @@ function RealCampaigns({ businessId }: { businessId: string }) {
   }, [runFetch, clearTimer]);
 
   if (state.phase === "loading") {
-    return (
-      <CenteredNote>
-        <span style={{ fontSize: 14, color: C.muted }}>Loading your campaigns…</span>
-      </CenteredNote>
-    );
+    return <CampaignsSkeleton />;
   }
 
   if (state.phase === "error") {
@@ -428,11 +425,7 @@ export function CampaignsScreen() {
   if (business.status === "none") {
     body = <EmptyState />;
   } else if (business.status === "loading") {
-    body = (
-      <CenteredNote>
-        <span style={{ fontSize: 14, color: C.muted }}>Loading your dashboard…</span>
-      </CenteredNote>
-    );
+    body = <CampaignsSkeleton />;
   } else if (business.status === "ready" && business.businessId) {
     body = <RealCampaigns businessId={business.businessId} />;
   } else {
