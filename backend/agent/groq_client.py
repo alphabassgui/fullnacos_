@@ -165,6 +165,7 @@ def create_chat_completion(
     model_kind="text",
     temperature=0.2,
     response_format=None,
+    max_tokens=None,
 ):
     """
     Run ``client.chat.completions.create`` with 429 retry + model failover.
@@ -188,6 +189,8 @@ def create_chat_completion(
     extra = {}
     if response_format is not None:
         extra["response_format"] = response_format
+    if max_tokens is not None:
+        extra["max_tokens"] = max_tokens
 
     last_error = None
 
