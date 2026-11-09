@@ -37,10 +37,12 @@ _MODEL_KINDS = {
     "text": ("GROQ_MODEL", "llama-3.3-70b-versatile", "GROQ_MODEL_FALLBACKS"),
     "vision": ("GROQ_VISION_MODEL", "qwen/qwen3.8-27b", "GROQ_VISION_MODEL_FALLBACKS"),
     # Code-editing calls send full file contents and can easily exceed the
-    # 8-12K TPM limits of smaller models.  Kimi K2 has a 262K context
-    # window on Groq's free tier; llama-3.3-70b-versatile (131K) is the
-    # built-in fallback in case K2 is unavailable.
-    "code": ("GROQ_CODE_MODEL", "kimi-k2-instruct", "GROQ_CODE_MODEL_FALLBACKS"),
+    # 8-12K TPM limits of smaller models.  llama-3.3-70b-versatile has a
+    # 131K context window — large enough for most single-file edits.
+    # The safety-net fallback (below) also targets this model, so if the
+    # env var overrides the primary to something that gets pulled, the
+    # pipeline still recovers.
+    "code": ("GROQ_CODE_MODEL", "llama-3.3-70b-versatile", "GROQ_CODE_MODEL_FALLBACKS"),
 }
 
 
