@@ -23,27 +23,71 @@ import logging
 import os
 import time
 
-from groq import RateLimitError
+from openai import OpenAI, RateLimitError
 
 logger = logging.getLogger(__name__)
+
+# OpenRouter is OpenAI-compatible, so we use the OpenAI SDK pointed at
+# OpenRouter's base URL. Default endpoint can be overridden via env.
+_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+
+# Hardcoded safety-net model for code editing: an OpenRouter-valid free coder
+# so a removed/renamed primary never breaks the pipeline entirely.
+_CODE_SAFETY_NET = "recursive/flint-v1.0:free"
 
 # Bounded retries per model before failing over to the next model in the list.
 _MAX_ATTEMPTS_PER_MODEL = 3
 # Exponential backoff base used only when no retry-after header is provided.
 _BASE_BACKOFF_SECONDS = 1.0
 
-# kind -> (primary env var, default model, fallbacks env var)
+# kind -> (new primary env, legacy primary env, default model,
+#          new fallbacks env, legacy fallbacks env)
+#
+# New OPENROUTER_* env vars are read first; the legacy GROQ_* names are kept
+# as a fallback so a missed Render rename can't take the pipeline down. All
+# defaults are OpenRouter model IDs (the legacy Groq IDs are not valid here).
 _MODEL_KINDS = {
-    "text": ("GROQ_MODEL", "llama-3.3-70b-versatile", "GROQ_MODEL_FALLBACKS"),
-    "vision": ("GROQ_VISION_MODEL", "qwen/qwen3.8-27b", "GROQ_VISION_MODEL_FALLBACKS"),
-    # Code-editing calls send full file contents and can easily exceed the
-    # 8-12K TPM limits of smaller models.  llama-3.3-70b-versatile has a
-    # 131K context window — large enough for most single-file edits.
-    # The safety-net fallback (below) also targets this model, so if the
-    # env var overrides the primary to something that gets pulled, the
-    # pipeline still recovers.
-    "code": ("GROQ_CODE_MODEL", "llama-3.3-70b-versatile", "GROQ_CODE_MODEL_FALLBACKS"),
+    "text": (
+        "OPENROUTER_MODEL", "GROQ_MODEL",
+        "cohere/north-mini-code:free",
+        "OPENROUTER_MODEL_FALLBACKS", "GROQ_MODEL_FALLBACKS",
+    ),
+    # NOTE: vision needs a multimodal free model. qwen3.8-27b:free is listed
+    # free on OpenRouter but its vision support is UNVERIFIED — confirm before
+    # relying on image calls, or point OPENROUTER_VISION_MODEL at a known
+    # multimodal model.
+    "vision": (
+        "OPENROUTER_VISION_MODEL", "GROQ_VISION_MODEL",
+        "qwen/qwen3.8-27b:free",
+        "OPENROUTER_VISION_MODEL_FALLBACKS", "GROQ_VISION_MODEL_FALLBACKS",
+    ),
+    # Code-editing calls send full file contents. OpenRouter's free tier is
+    # request-limited, not token-per-minute limited, so large single-file
+    # edits that the old Groq free tier rejected now go through. Primary and
+    # fallback are both free coding models with large context windows; the
+    # safety net (below) backstops a pulled/renamed primary.
+    "code": (
+        "OPENROUTER_CODE_MODEL", "GROQ_CODE_MODEL",
+        "cohere/north-mini-code:free",
+        "OPENROUTER_CODE_MODEL_FALLBACKS", "GROQ_CODE_MODEL_FALLBACKS",
+    ),
 }
+
+
+def build_client():
+    """Build an OpenRouter (OpenAI-compatible) client, or None if no key.
+
+    Returns None when no API key is configured so importing a call-site
+    module never fails just because the key is absent (e.g. in tests, which
+    mock ``create_chat_completion`` and never touch the client). Reads the new
+    OPENROUTER_API_KEY first, falling back to the legacy GROQ_API_KEY.
+    """
+
+    api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("GROQ_API_KEY")
+    if not api_key:
+        return None
+    base_url = os.getenv("OPENROUTER_BASE_URL", _DEFAULT_BASE_URL)
+    return OpenAI(api_key=api_key, base_url=base_url)
 
 
 def effective_models(model_kind):
@@ -56,12 +100,24 @@ def effective_models(model_kind):
     """
 
     try:
-        primary_env, default_model, fallbacks_env = _MODEL_KINDS[model_kind]
+        (
+            primary_env, legacy_primary_env, default_model,
+            fallbacks_env, legacy_fallbacks_env,
+        ) = _MODEL_KINDS[model_kind]
     except KeyError as exc:
         raise ValueError(f"Unknown model_kind: {model_kind!r}") from exc
 
-    primary = os.getenv(primary_env, default_model)
-    fallbacks_raw = os.getenv(fallbacks_env, "")
+    # New OPENROUTER_* env wins; legacy GROQ_* is the fallback; then default.
+    primary = (
+        os.getenv(primary_env)
+        or os.getenv(legacy_primary_env)
+        or default_model
+    )
+    fallbacks_raw = (
+        os.getenv(fallbacks_env)
+        or os.getenv(legacy_fallbacks_env)
+        or ""
+    )
 
     models = [primary]
     for candidate in fallbacks_raw.split(","):
@@ -71,8 +127,8 @@ def effective_models(model_kind):
 
     # Always include a hardcoded safety-net fallback for code editing so a
     # removed or renamed model doesn't break the pipeline entirely.
-    if model_kind == "code" and "llama-3.3-70b-versatile" not in models:
-        models.append("llama-3.3-70b-versatile")
+    if model_kind == "code" and _CODE_SAFETY_NET not in models:
+        models.append(_CODE_SAFETY_NET)
 
     return models
 
@@ -151,7 +207,7 @@ def create_chat_completion(
                     if wait is None:
                         wait = _backoff_seconds(attempt)
                     logger.warning(
-                        "Groq 429 on model %s (attempt %d/%d); retrying in %.2fs",
+                        "429 on model %s (attempt %d/%d); retrying in %.2fs",
                         model,
                         attempt + 1,
                         _MAX_ATTEMPTS_PER_MODEL,
@@ -160,7 +216,7 @@ def create_chat_completion(
                     time.sleep(wait)
                 else:
                     logger.warning(
-                        "Groq 429 exhausted retries on model %s; failing over",
+                        "429 exhausted retries on model %s; failing over",
                         model,
                     )
 

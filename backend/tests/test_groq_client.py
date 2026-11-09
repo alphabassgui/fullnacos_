@@ -3,7 +3,7 @@ Unit tests for agent.groq_client (429 retry + model failover wrapper).
 """
 import httpx
 import pytest
-from groq import RateLimitError
+from openai import RateLimitError
 
 import agent.groq_client as gc
 
@@ -24,7 +24,7 @@ class _Response:
 
 
 def _rate_limit_error(retry_after=None):
-    """Build a genuine groq.RateLimitError, optionally carrying retry-after."""
+    """Build a genuine openai.RateLimitError, optionally carrying retry-after."""
     headers = {}
     if retry_after is not None:
         headers["retry-after"] = str(retry_after)
@@ -70,13 +70,17 @@ def _clean_env(monkeypatch):
         "GROQ_VISION_MODEL",
         "GROQ_MODEL_FALLBACKS",
         "GROQ_VISION_MODEL_FALLBACKS",
+        "OPENROUTER_MODEL",
+        "OPENROUTER_VISION_MODEL",
+        "OPENROUTER_MODEL_FALLBACKS",
+        "OPENROUTER_VISION_MODEL_FALLBACKS",
     ):
         monkeypatch.delenv(var, raising=False)
 
 
 def test_effective_models_primary_only_when_fallbacks_unset():
-    assert gc.effective_models("text") == ["llama-3.3-70b-versatile"]
-    assert gc.effective_models("vision") == ["qwen/qwen3.8-27b"]
+    assert gc.effective_models("text") == ["cohere/north-mini-code:free"]
+    assert gc.effective_models("vision") == ["qwen/qwen3.8-27b:free"]
 
 
 def test_effective_models_appends_fallbacks(monkeypatch):
@@ -91,7 +95,7 @@ def test_success_first_call_returns_response():
     resp = gc.create_chat_completion(client, messages=[], model_kind="text")
     assert resp.choices[0].message.content == "ok"
     assert len(state["calls"]) == 1
-    assert state["calls"][0]["model"] == "llama-3.3-70b-versatile"
+    assert state["calls"][0]["model"] == "cohere/north-mini-code:free"
 
 
 def test_429_then_success_same_model(_no_sleep):
@@ -100,8 +104,8 @@ def test_429_then_success_same_model(_no_sleep):
     assert resp.choices[0].message.content == "ok"
     # Two calls, both on the same primary model (no failover yet).
     assert [c["model"] for c in state["calls"]] == [
-        "llama-3.3-70b-versatile",
-        "llama-3.3-70b-versatile",
+        "cohere/north-mini-code:free",
+        "cohere/north-mini-code:free",
     ]
 
 

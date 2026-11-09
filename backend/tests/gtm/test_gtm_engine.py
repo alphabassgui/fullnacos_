@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
-from groq import RateLimitError
+from openai import RateLimitError
 
 from agent.gtm_engine import (
     encode_tile_to_base64,
@@ -171,7 +171,7 @@ def test_analyze_gtm_tiles_end_to_end(tmp_path):
         )
     ]
 
-    with patch("agent.gtm_engine.Groq") as mock_groq:
+    with patch("agent.gtm_engine.build_client") as mock_groq:
         mock_groq.return_value.chat.completions.create.return_value = mock_llm_response
         result = analyze_gtm_tiles(user_manifest, competitor_manifests, ["marketing automation"])
 
@@ -181,7 +181,7 @@ def test_analyze_gtm_tiles_end_to_end(tmp_path):
 
 
 def test_analyze_gtm_tiles_handles_llm_exception():
-    with patch("agent.gtm_engine.Groq") as mock_groq:
+    with patch("agent.gtm_engine.build_client") as mock_groq:
         mock_groq.return_value.chat.completions.create.side_effect = Exception("API rate limit exceeded")
         result = analyze_gtm_tiles({}, [], [])
 
@@ -193,7 +193,7 @@ def test_analyze_gtm_tiles_retries_on_429_then_succeeds(monkeypatch):
     import agent.groq_client as gc
 
     monkeypatch.setattr(gc.time, "sleep", lambda *_a, **_k: None)
-    with patch("agent.gtm_engine.Groq") as mock_groq:
+    with patch("agent.gtm_engine.build_client") as mock_groq:
         mock_groq.return_value.chat.completions.create.side_effect = [
             _rate_limit_error(retry_after=1),
             _vision_response(),
@@ -210,7 +210,7 @@ def test_analyze_gtm_tiles_fails_over_to_fallback_vision_model(monkeypatch):
     monkeypatch.setenv("GROQ_VISION_MODEL", "vis-a")
     monkeypatch.setenv("GROQ_VISION_MODEL_FALLBACKS", "vis-b")
 
-    with patch("agent.gtm_engine.Groq") as mock_groq:
+    with patch("agent.gtm_engine.build_client") as mock_groq:
         create = mock_groq.return_value.chat.completions.create
         create.side_effect = [
             _rate_limit_error(),
@@ -229,7 +229,7 @@ def test_analyze_gtm_tiles_persistent_429_returns_graceful_default(monkeypatch):
     import agent.groq_client as gc
 
     monkeypatch.setattr(gc.time, "sleep", lambda *_a, **_k: None)
-    with patch("agent.gtm_engine.Groq") as mock_groq:
+    with patch("agent.gtm_engine.build_client") as mock_groq:
         mock_groq.return_value.chat.completions.create.side_effect = [
             _rate_limit_error() for _ in range(3)
         ]
