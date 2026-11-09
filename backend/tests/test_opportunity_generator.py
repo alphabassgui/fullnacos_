@@ -116,7 +116,7 @@ def test_valid_array_returns_validated_opportunities(og, fake_client, monkeypatc
     result = og.generate_opportunities(ANALYSIS)
     assert result == [VALID_ITEM]
     call = fake_client["calls"][0]
-    assert call["model"] == "llama-3.3-70b-versatile"
+    assert call["model"] == "cohere/north-mini-code:free"
     assert call["temperature"] == 0.2
     assert call["messages"][0]["content"] == prompts.OPPORTUNITY_GENERATION_SYSTEM_PROMPT
     assert "ACME sells widgets." in call["messages"][1]["content"]

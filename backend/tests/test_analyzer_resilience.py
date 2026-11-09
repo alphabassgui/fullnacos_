@@ -113,7 +113,7 @@ def test_salvage_recovers_fenced_json_with_prose(analyzer, monkeypatch):
     assert len(state["calls"]) == 1
     call = state["calls"][0]
     assert call["response_format"] == {"type": "json_object"}
-    assert call["model"] == "llama-3.3-70b-versatile"
+    assert call["model"] == "cohere/north-mini-code:free"
     assert call["temperature"] == 0.2
     assert (
         call["messages"][0]["content"]
@@ -170,8 +170,8 @@ def test_analyzer_retries_on_429_then_succeeds(
     assert result == VALID_ANALYSIS
     # Wrapper absorbed the 429 and retried on the same primary model.
     assert [c["model"] for c in state["calls"]] == [
-        "llama-3.3-70b-versatile",
-        "llama-3.3-70b-versatile",
+        "cohere/north-mini-code:free",
+        "cohere/north-mini-code:free",
     ]
 
 
