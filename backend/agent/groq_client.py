@@ -37,9 +37,12 @@ _MODEL_KINDS = {
     "text": ("GROQ_MODEL", "llama-3.3-70b-versatile", "GROQ_MODEL_FALLBACKS"),
     "vision": ("GROQ_VISION_MODEL", "qwen/qwen3.8-27b", "GROQ_VISION_MODEL_FALLBACKS"),
     # Code-editing calls send full file contents and can easily exceed the
-    # 8-12K TPM limits of smaller models.  Llama 4 Scout has 30K TPM on the
-    # free tier and a 131K context window — enough for most source files.
-    "code": ("GROQ_CODE_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct", "GROQ_CODE_MODEL_FALLBACKS"),
+    # 8-12K TPM limits of smaller models.  llama-3.3-70b-versatile has a
+    # 131K context window — large enough for most single-file edits.
+    # The safety-net fallback (below) also targets this model, so if the
+    # env var overrides the primary to something that gets pulled, the
+    # pipeline still recovers.
+    "code": ("GROQ_CODE_MODEL", "llama-3.3-70b-versatile", "GROQ_CODE_MODEL_FALLBACKS"),
 }
 
 
@@ -65,6 +68,11 @@ def effective_models(model_kind):
         candidate = candidate.strip()
         if candidate and candidate not in models:
             models.append(candidate)
+
+    # Always include a hardcoded safety-net fallback for code editing so a
+    # removed or renamed model doesn't break the pipeline entirely.
+    if model_kind == "code" and "llama-3.3-70b-versatile" not in models:
+        models.append("llama-3.3-70b-versatile")
 
     return models
 
