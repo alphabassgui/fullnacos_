@@ -24,6 +24,8 @@ import json
 import logging
 import os
 
+from openai import BadRequestError
+
 from agent.groq_client import build_client, create_chat_completion
 
 logger = logging.getLogger(__name__)
@@ -209,31 +211,42 @@ def generate_grounded_edit(path, original_content, action, sibling_paths=None):
         f"-----8<----- END FILE -----8<-----\n"
     )
 
-    response = create_chat_completion(
-        client,
-        model_kind="code",
-        messages=[
-            {"role": "system", "content": GROUNDED_EDIT_SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.1,
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "grounded_edit",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "changed": {"type": "boolean"},
-                        "summary": {"type": "string"},
-                        "content": {"type": "string"},
-                    },
-                    "required": ["changed", "summary", "content"],
-                    "additionalProperties": False,
-                },
-            },
-        },
-    )
+    messages = [
+        {"role": "system", "content": GROUNDED_EDIT_SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    # Give the model enough room to echo the full file back as JSON. A free
+    # endpoint with a small default output cap was truncating large files
+    # mid-string, yielding invalid JSON. Size the budget to the input (chars
+    # roughly track tokens x4) plus headroom, capped so we never ask for more
+    # than a large free model will serve.
+    max_tokens = min(32000, max(4000, len(original_content) // 3 + 2000))
+
+    # Ask for a JSON object (widely supported across OpenRouter's free
+    # models), not a strict json_schema — most free endpoints only treat a
+    # schema as a hint and return malformed output. The system prompt already
+    # pins the exact keys. If a given model rejects response_format entirely,
+    # fall back to a plain call and lean on tolerant parsing below.
+    def _call(with_json_mode):
+        kwargs = {}
+        if with_json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+        return create_chat_completion(
+            client,
+            model_kind="code",
+            messages=messages,
+            temperature=0.1,
+            max_tokens=max_tokens,
+            **kwargs,
+        )
+
+    try:
+        response = _call(with_json_mode=True)
+    except BadRequestError:
+        # Model/provider doesn't accept response_format — retry without it.
+        logger.warning("json_object not accepted for grounded edit; retrying without it")
+        response = _call(with_json_mode=False)
 
     raw = response.choices[0].message.content
     if not raw:
@@ -249,8 +262,18 @@ def generate_grounded_edit(path, original_content, action, sibling_paths=None):
 
     try:
         payload = json.loads(stripped)
-    except json.JSONDecodeError as exc:
-        raise ValueError("Grounded edit returned invalid JSON") from exc
+    except json.JSONDecodeError:
+        # Some free models wrap the JSON in prose or a stray prefix. Retry on
+        # just the outermost {...} span before giving up.
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if start != -1 and end > start:
+            try:
+                payload = json.loads(stripped[start:end + 1])
+            except json.JSONDecodeError as exc:
+                raise ValueError("Grounded edit returned invalid JSON") from exc
+        else:
+            raise ValueError("Grounded edit returned invalid JSON")
 
     if not isinstance(payload, dict):
         raise ValueError("Grounded edit response must be a JSON object")
