@@ -24,26 +24,12 @@ import json
 import logging
 import os
 
-from groq import Groq
-
-from agent.groq_client import create_chat_completion
+from agent.groq_client import build_client, create_chat_completion
 
 logger = logging.getLogger(__name__)
 
 
-def _build_client():
-    """Build the Groq client when a key is configured.
-
-    Importing this module must never fail just because the key is absent (e.g.
-    in tests, which mock ``create_chat_completion`` and never touch the client).
-    """
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        return None
-    return Groq(api_key=api_key)
-
-
-client = _build_client()
+client = build_client()
 
 
 # File types that plausibly hold page markup, copy, or head metadata.
@@ -193,7 +179,7 @@ def generate_grounded_edit(path, original_content, action, sibling_paths=None):
     opening an empty or invalid PR.
     """
     if client is None:
-        raise ValueError("GROQ_API_KEY is not configured")
+        raise ValueError("OPENROUTER_API_KEY (or legacy GROQ_API_KEY) is not configured")
 
     intent = _change_intent(action)
 

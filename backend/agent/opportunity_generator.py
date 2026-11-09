@@ -1,9 +1,7 @@
 import json
 import os
 
-from groq import Groq
-
-from agent.groq_client import create_chat_completion
+from agent.groq_client import build_client, create_chat_completion
 from agent.prompts import OPPORTUNITY_GENERATION_SYSTEM_PROMPT
 from agent.opportunity_validation import (
     validate_opportunity_item,
@@ -12,9 +10,7 @@ from agent.opportunity_validation import (
 from dotenv import load_dotenv
 load_dotenv()
 
-client = Groq(
-    api_key=os.getenv("GROQ_API_KEY")
-)
+client = build_client()
 
 
 def generate_opportunities(business_analysis):

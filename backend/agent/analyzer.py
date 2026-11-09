@@ -3,18 +3,14 @@ import os
 import re
 import time
 
-from groq import Groq
-
-from agent.groq_client import create_chat_completion
+from agent.groq_client import build_client, create_chat_completion
 from agent.prompts import (
     OBSERVATION_ANALYSIS_SYSTEM_PROMPT,
     OBSERVATION_ANALYSIS_USER_PROMPT,
 )
 
 
-client = Groq(
-    api_key=os.getenv("GROQ_API_KEY")
-)
+client = build_client()
 
 
 # Free-tier Groq occasionally returns malformed/truncated output, so the

@@ -1,16 +1,12 @@
 import json
 import os
 
-from groq import Groq
-
-from agent.groq_client import create_chat_completion
+from agent.groq_client import build_client, create_chat_completion
 from agent.prompts import DECISION_ENGINE_SYSTEM_PROMPT
 from services.learning_service import get_business_learnings
 
 
-client = Groq(
-    api_key=os.getenv("GROQ_API_KEY")
-)
+client = build_client()
 
 def validate_action(action):
     if not isinstance(action, dict):

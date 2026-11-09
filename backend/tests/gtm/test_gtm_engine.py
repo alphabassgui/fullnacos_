@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
-from groq import RateLimitError
+from openai import RateLimitError
 
 from agent.gtm_engine import (
     encode_tile_to_base64,

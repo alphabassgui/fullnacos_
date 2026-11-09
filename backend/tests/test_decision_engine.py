@@ -5,7 +5,7 @@ import json
 
 import httpx
 import pytest
-from groq import RateLimitError
+from openai import RateLimitError
 
 from agent import prompts
 

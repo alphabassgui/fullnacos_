@@ -18,9 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from groq import Groq
-
-from agent.groq_client import create_chat_completion
+from agent.groq_client import build_client, create_chat_completion
 
 load_dotenv()
 
@@ -271,8 +269,7 @@ def analyze_gtm_tiles(
         search_queries=search_queries,
     )
 
-    api_key = os.getenv("GROQ_API_KEY")
-    client = Groq(api_key=api_key)
+    client = build_client()
 
     # Vision model selection (primary GROQ_VISION_MODEL + GROQ_VISION_MODEL_FALLBACKS)
     # and 429 retry/failover are handled by create_chat_completion. Groq rotates/
