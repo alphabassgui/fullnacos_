@@ -93,7 +93,10 @@ def test_generate_action_success(de, monkeypatch):
     assert result["action_title"] == VALID_ACTION["action_title"]
     assert len(state["calls"]) == 1
     # decision_engine sends no response_format; wrapper must not inject one.
-    assert state["calls"][0]["kwargs"] == {}
+    assert "response_format" not in state["calls"][0]["kwargs"]
+    # But a bounded max_tokens is always sent (text default) to avoid the
+    # OpenRouter full-window reservation 402.
+    assert state["calls"][0]["kwargs"]["max_tokens"] == 8000
 
 
 def test_generate_action_requires_business_id(de):
