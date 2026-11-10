@@ -35,6 +35,30 @@ _DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 # so a removed/renamed primary never breaks the pipeline entirely.
 _CODE_SAFETY_NET = "recursive/flint-v1.0:free"
 
+# Default output cap per model kind, applied when a caller passes no
+# max_tokens. OpenRouter reserves the model's FULL output window against the
+# account balance up front when max_tokens is omitted, so an uncapped request
+# on a large-context free model reserves 65K-131K tokens and 402s ("requires
+# more credits, or fewer max_tokens") on a low free-tier allowance. These caps
+# keep each reservation small; the code path passes its own (larger) explicit
+# value and is unaffected. Override per environment via OPENROUTER_MAX_TOKENS_*.
+_DEFAULT_MAX_TOKENS = {
+    "text": 8000,
+    "vision": 8000,
+    "code": 16000,
+}
+
+
+def _default_max_tokens(model_kind):
+    env = os.getenv(f"OPENROUTER_MAX_TOKENS_{model_kind.upper()}")
+    if env:
+        try:
+            return int(env)
+        except ValueError:
+            logger.warning("Invalid OPENROUTER_MAX_TOKENS_%s=%r; using built-in default",
+                           model_kind.upper(), env)
+    return _DEFAULT_MAX_TOKENS.get(model_kind, 8000)
+
 # Bounded retries per model before failing over to the next model in the list.
 _MAX_ATTEMPTS_PER_MODEL = 3
 # Exponential backoff base used only when no retry-after header is provided.
@@ -186,11 +210,14 @@ def create_chat_completion(
 
     models = effective_models(model_kind)
 
-    extra = {}
+    # Always send a max_tokens so OpenRouter never reserves a model's full
+    # output window against the account balance (see _DEFAULT_MAX_TOKENS).
+    if max_tokens is None:
+        max_tokens = _default_max_tokens(model_kind)
+
+    extra = {"max_tokens": max_tokens}
     if response_format is not None:
         extra["response_format"] = response_format
-    if max_tokens is not None:
-        extra["max_tokens"] = max_tokens
 
     last_error = None
 

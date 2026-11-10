@@ -78,13 +78,14 @@ def _sequence_client(responses):
     state = {"i": 0, "calls": []}
 
     def create(*, model=None, messages=None, temperature=None,
-               response_format=None):
+               response_format=None, max_tokens=None):
         state["calls"].append(
             {
                 "model": model,
                 "messages": messages,
                 "temperature": temperature,
                 "response_format": response_format,
+                "max_tokens": max_tokens,
             }
         )
         item = responses[state["i"]]
@@ -115,6 +116,9 @@ def test_salvage_recovers_fenced_json_with_prose(analyzer, monkeypatch):
     assert call["response_format"] == {"type": "json_object"}
     assert call["model"] == "cohere/north-mini-code:free"
     assert call["temperature"] == 0.2
+    # A bounded max_tokens must always be sent so OpenRouter never reserves
+    # the model's full output window against the free-tier allowance (402).
+    assert call["max_tokens"] == 8000
     assert (
         call["messages"][0]["content"]
         == prompts.OBSERVATION_ANALYSIS_SYSTEM_PROMPT
