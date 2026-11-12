@@ -45,7 +45,7 @@ Under the hood:
                                       v
                                [ Backend: Flask :5000 ]
                                 /        |            \
-                        Supabase    Redis + Celery     Groq LLM
+                        Supabase    Redis + Celery   OpenRouter LLM
                     (Postgres DB)   (async jobs:       (text drafts +
                                      analyze /          vision scoring)
                                      execute /
@@ -63,8 +63,10 @@ Alongside the main loop, **GTM / PixelRAG** (section 5) runs as its own on-deman
 ## 3. Tech stack
 
 **Frontend** — Next.js 16 (App Router) · TypeScript · Tailwind CSS · shadcn/ui · Framer Motion
-**Backend** — Flask · Supabase (Postgres, via SQLAlchemy + Flask-Migrate/Alembic) · Redis + Celery (background jobs) · Groq (LLM)
-**Visual GTM (PixelRAG)** — headless **Playwright Chromium** (full-page screenshots + vertical tiling → WebP) · **Groq Vision LLM** (multimodal scoring of your site vs competitors)
+**Backend** — Flask · Supabase (Postgres, via SQLAlchemy + Flask-Migrate/Alembic) · Redis + Celery (background jobs) · **OpenRouter** (LLM, via the OpenAI-compatible SDK)
+**Visual GTM (PixelRAG)** — headless **Playwright Chromium** (full-page screenshots + vertical tiling → WebP) · **OpenRouter Vision LLM** (multimodal — image-input — scoring of your site vs competitors)
+
+> **LLM provider note:** the backend migrated from Groq to **OpenRouter** (an OpenAI-compatible aggregator) so large code-edit requests aren't blocked by Groq's free-tier per-minute token cap. The client is the OpenAI SDK pointed at `https://openrouter.ai/api/v1`. Model IDs are configured via `OPENROUTER_*` env vars (legacy `GROQ_*` names are still read as a fallback). See section 7a.
 **Auth** — Flask session **cookie** (the frontend calls the API with `credentials: 'include'`)
 
 ---
@@ -75,7 +77,7 @@ The **full demo loop runs end to end on real data**:
 
 - ✅ Email/password **sign up + login** (Flask session cookie)
 - ✅ **Onboarding** → create a business from a website
-- ✅ **Analyze** the website (async, via Celery + Groq)
+- ✅ **Analyze** the website (async, via Celery + OpenRouter)
 - ✅ **Opportunities** — real, ranked customer/search gaps
   - **Recovery + re-run:** if a user lands on the dashboard without an audit (e.g. they skipped onboarding), they can **add a website and run the audit right there** (a modal, no need to redo onboarding), or **re-run the audit any time** from the board. While a run works, the page shows a real in-dashboard **"Analysing → Reading your site"** state (not a generic loader), and a re-run keeps existing results on screen until the fresh ones arrive.
 - ✅ **Campaign draft** → **approve** → **execute** → **measure**
@@ -140,11 +142,13 @@ Two different kinds of timeout matter, plus one model-lifecycle risk:
 | **PixelRAG** per-tile screenshot | `screenshot_timeout_ms` | **20 s** |
 | **Frontend** per-request fetch (`apiFetch` + dossier fetch) | `AbortController` | **60 s** |
 | **Frontend** poll cadence / ceiling | every **15 s**, up to **40 ticks** (~10 min) before giving up |
-| **Vision LLM** request | Groq default request timeout (not overridden in code) | Groq default |
+| **Vision LLM** request | OpenRouter / upstream provider default (not overridden in code) | provider default |
 
-> **"Timeout of models" / model decommission risk:** the vision model id is **`GROQ_VISION_MODEL`** (default `qwen/qwen3.8-27b`). **Groq rotates and retires models** — the previous default (`llama-3.2-11b-vision-preview`) was **decommissioned**, which breaks a run with a model-not-found error until the env var is pointed at a current multimodal model. If GTM runs start failing at the vision step, **check this first**. (The text LLM used elsewhere is `GROQ_MODEL`.)
+> **"Timeout of models" / model rotation risk:** the vision model id is **`OPENROUTER_VISION_MODEL`** (default `qwen/qwen3.8-27b:free`). **OpenRouter's free models rotate and can be withdrawn** — a pulled `:free` model breaks a run with a model error until the env var is pointed at a current **multimodal (image-input) `:free`** model. If GTM runs start failing at the vision step, **check this first**. (The text/code LLM id is `OPENROUTER_MODEL` / `OPENROUTER_CODE_MODEL`, default `cohere/north-mini-code:free`; legacy `GROQ_*` names are read as a fallback.)
 
-> **Vision model image cap:** `qwen/qwen3.8-27b` (and most Groq vision models) accept a **maximum of 3 images** per request. The GTM payload is therefore capped at a balanced set: **1 user-site tile + 1 tile per competitor (up to 2)**. Exceeding 3 images previously caused a 400 error and flat-50 fallback scores; this cap prevents it.
+> **⚠️ OpenRouter free-tier 402 ("requires more credits, or fewer max_tokens"):** when a request omits `max_tokens`, OpenRouter **reserves the model's entire output window** (65K–131K tokens) against your account's free allowance up front and rejects it. The backend now **always sends a bounded `max_tokens`** per call kind (text/vision 8000, code 16000; override via `OPENROUTER_MAX_TOKENS_{TEXT,VISION,CODE}`), which prevents this. If you see a 402 at the vision step on a new account, confirm you're on a build that includes this cap. **This is not a billing problem and needs no credits.**
+
+> **Vision model image cap:** `qwen/qwen3.8-27b:free` (and most vision models) accept a **maximum of 3 images** per request. The GTM payload is therefore capped at a balanced set: **1 user-site tile + 1 tile per competitor (up to 2)**. Exceeding 3 images previously caused a 400 error and flat-50 fallback scores; this cap prevents it.
 
 ### ⚠️ Risks & known limitations (read before demoing GTM)
 - **Tiles are transient.** They live on Render's **ephemeral disk**, which is wiped on every redeploy and is **not shared across instances**. An older run's screenshots can simply be gone. The UI treats this as best-effort: a broken image is hidden on error, and a run with no tiles shows **"Visual capture unavailable for this run"** instead of a broken layout. Treat tiles as best-effort, never as durable storage.
@@ -164,7 +168,7 @@ Two different kinds of timeout matter, plus one model-lifecycle risk:
   - On **Windows**, use **Memurai** (a Redis-compatible service)
 - A **Supabase Postgres database** (connection string in `DATABASE_URL`)
 - A **Tavily API key** (free tier) for GTM competitor discovery
-- A **Groq API key**
+- An **OpenRouter API key** (free account — [openrouter.ai](https://openrouter.ai))
 - A **GitHub OAuth app** (only needed for the GitHub connection)
 - A **BMONI sandbox key** (only needed for payments) — ask **William**
 
@@ -187,9 +191,12 @@ There is **no example file** for the backend, so create `backend/.env` yourself 
 | `DATABASE_URL` | Supabase Postgres connection string. The backend inits SQLAlchemy + Flask-Migrate from it; app boots DB-less if unset. |
 | `TAVILY_API_KEY` | Tavily search API key for GTM competitor discovery. GTM still runs if unset; discovery just returns no competitors. |
 | `TEST_DATABASE_URL` | A **separate** throwaway Postgres URL for the pytest suite's DB-backed tests. Keep it off production; CI sets it. |
-| `GROQ_API_KEY` | Your Groq LLM API key. |
-| `GROQ_MODEL` | The **text** model id, e.g. `openai/gpt-oss-20b`. |
-| `GROQ_VISION_MODEL` | The **vision** model id for GTM / PixelRAG (default `qwen/qwen3.8-27b`). **Point it at a current multimodal model** — Groq retires these (see section 5 "Model & capture timeouts"). |
+| `OPENROUTER_API_KEY` | Your OpenRouter API key (OpenAI-compatible). The code reads this first; it falls back to `GROQ_API_KEY` if unset. |
+| `OPENROUTER_MODEL` | The **text** model id (default `cohere/north-mini-code:free`). Falls back to legacy `GROQ_MODEL`. |
+| `OPENROUTER_CODE_MODEL` | The **code-edit** model id (default `cohere/north-mini-code:free`, with `recursive/flint-v1.0:free` as fallback). Falls back to legacy `GROQ_CODE_MODEL`. |
+| `OPENROUTER_VISION_MODEL` | The **vision** (image-input) model id for GTM / PixelRAG (default `qwen/qwen3.8-27b:free`). **Point it at a current multimodal `:free` model** — OpenRouter rotates free models (see section 5). Falls back to legacy `GROQ_VISION_MODEL`. |
+| `OPENROUTER_MAX_TOKENS_{TEXT,VISION,CODE}` | *(optional)* Per-kind output cap (defaults 8000 / 8000 / 16000). Prevents the OpenRouter free-tier 402 "reservation" error; only set to tune. |
+| `OPENROUTER_BASE_URL` | *(optional)* Defaults to `https://openrouter.ai/api/v1`. |
 | `TOKEN_ENCRYPTION_KEY` | Encrypts stored OAuth tokens (a Fernet key). |
 | `GITHUB_CLIENT_ID` | From your GitHub **OAuth App**. |
 | `GITHUB_CLIENT_SECRET` | From your GitHub **OAuth App**. |
@@ -297,7 +304,8 @@ All under cookie auth (`credentials: 'include'`). Business routes are under `/ap
 | **GitHub connection shows "Try again" / 401** | The OAuth token expired or the callback URL doesn't match. Use an **OAuth App**, set both the app's callback and `GITHUB_REDIRECT_URI` to `http://localhost:5000/api/connections/github/callback`, restart Flask, and reconnect. |
 | **"No connector available for action type: X"** | Make sure the backend is on the latest `main` (the connector fallback is merged). |
 | **Analyze crashes: "Opportunity response must be a JSON object"** | The small LLM occasionally returns malformed JSON. Just **re-run analyze**. |
-| **GTM run fails at the vision step (model-not-found)** | The vision model was retired by Groq. Set `GROQ_VISION_MODEL` to a current multimodal model and restart (see section 5). |
+| **GTM run fails at the vision step (model-not-found)** | The free vision model was rotated out by OpenRouter. Set `OPENROUTER_VISION_MODEL` to a current multimodal (image-input) `:free` model and restart (see section 5). |
+| **GTM / analyze fails with 402 "requires more credits, or fewer max_tokens"** | OpenRouter reserved the model's full output window against your free allowance. Make sure the backend is on a build that sends a bounded `max_tokens` (text/vision 8000, code 16000). **Needs no credits.** See section 5. |
 | **GTM run shows "Visual capture unavailable" / flat 50 scores** | A soft-fail (Chromium OOM, screenshot timeout, or vision hiccup) — the run still completes. **Re-run** for a clean capture. Old runs may also have lost their tiles on a Render redeploy (ephemeral disk). |
 | **GTM screenshots keep timing out on big sites** | Heavy pages on Render's free tier. Mitigated by memory-safe Chromium flags + WebP tiling, but not eliminated; re-run, or try on a non-free instance. |
 | **Instagram won't publish** | Expected — publishing needs Meta app review; not in the MVP. |
