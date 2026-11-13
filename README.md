@@ -66,7 +66,7 @@ Alongside the main loop, **GTM / PixelRAG** (section 5) runs as its own on-deman
 **Backend** — Flask · Supabase (Postgres, via SQLAlchemy + Flask-Migrate/Alembic) · Redis + Celery (background jobs) · **OpenRouter** (LLM, via the OpenAI-compatible SDK)
 **Visual GTM (PixelRAG)** — headless **Playwright Chromium** (full-page screenshots + vertical tiling → WebP) · **OpenRouter Vision LLM** (multimodal — image-input — scoring of your site vs competitors)
 
-> **LLM provider note:** the backend migrated from Groq to **OpenRouter** (an OpenAI-compatible aggregator) so large code-edit requests aren't blocked by Groq's free-tier per-minute token cap. The client is the OpenAI SDK pointed at `https://openrouter.ai/api/v1`. Model IDs are configured via `OPENROUTER_*` env vars (legacy `GROQ_*` names are still read as a fallback). See section 7a.
+> **LLM provider note:** the backend migrated from Groq to **OpenRouter** (an OpenAI-compatible aggregator) so large code-edit requests aren't blocked by Groq's free-tier per-minute token cap. The client is the OpenAI SDK pointed at `https://openrouter.ai/api/v1`. Model IDs are configured via `OPENROUTER_*` env vars (legacy `GROQ_*` names are still read as a fallback). See section 8a.
 **Auth** — Flask session **cookie** (the frontend calls the API with `credentials: 'include'`)
 
 ---
@@ -160,7 +160,42 @@ Two different kinds of timeout matter, plus one model-lifecycle risk:
 
 ---
 
-## 6. Prerequisites (install these once)
+## 6. Payments (BMONI sandbox)
+
+Groville's **pricing + subscription billing**, built on **BMONI** as the Nigerian-naira payment rail. **Sandbox only** for the hackathon (BMONI confirmed they can't issue a production key during the event). The code lives in the **frontend** (Next.js API routes under `frontend/app/api/*`, with the billing + BMONI logic in `frontend/lib/billing/*` and `frontend/lib/bmoni/*`). **Full detail, the live-test history, and the exact API contract are in [`frontend/docs/payments/README.md`](frontend/docs/payments/README.md).**
+
+### What works today
+- ✅ **Pricing maths** — monthly/annual, NGN with USD **display**, annual −20% (tested against the mockup).
+- ✅ **Invoices, subscriptions, expiry, reminders, renewals** — plus a **daily job** that expires unpaid invoices/lapsed subs and creates renewal invoices + reminders.
+- ✅ **Bank-transfer checkout** — details → **waiting for payment** → **received**, showing the **real BMONI sandbox virtual account** (PROVIDUS BANK, a test identity) or a **clearly-labelled demo placeholder** if BMONI onboarding is down.
+- ✅ **Simulate-payment button** (sandbox only, labelled on screen) that completes the demo through the **same code path** a real deposit uses.
+- ✅ **Three ways to detect a payment:** signed **webhook** (`employee.deposit.completed`, HMAC-verified over the raw body + deduped) → **balance-check** fallback (works without a public URL) → **simulate**.
+
+### How it works (key design decisions)
+- **BMONI is only the rail.** It has no plans/subscriptions/renewals — Groville built those.
+- **One merchant BMONI account receives every customer's payment;** customers need no BMONI user or BVN. Because deposits carry **no payer name or reference**, each invoice gets a **unique kobo amount** (e.g. **₦30,000.37**) and a deposit of exactly that amount pays that invoice.
+- **Prices live in one file** — `frontend/lib/billing/plans.config.ts`. The browser only ever sends `{ planId, interval }`; the **server prices it** (never trust a price from the client).
+- **Storage** is a JSON file (`data/db.json`) for the demo.
+- **Demo fallback** (`DEMO_FALLBACK_ACCOUNT=true`): if BMONI can't issue a real account, show a labelled placeholder so the flow still runs, and retry BMONI quietly in the background.
+
+### What was used (stack)
+- **BMONI Embedded API** — sandbox host `embedded-dev.bmoni.com` only (the client **refuses any other host**); API key is **server-side only**, never shipped to the browser.
+- **`ethers`** — generates the wallet **owner key** and signs the **owner-proof challenge** (EIP-191 `personal_sign`) during merchant provisioning.
+- **Next.js API routes** (`app/api/plans|signup|subscribe|invoices|webhooks/bmoni|sandbox/simulate-payment|jobs/daily`) + **`tsx`** for the `bmoni-proof.ts` and `register-webhook.ts` scripts.
+
+### Honesty & limitations (say these out loud in the demo)
+- **Sandbox only** — no real money, no real personal data, **test personas only**.
+- **Real deposit detection is unproven** — the BMONI sandbox can't simulate a bank transfer, so webhook/balance detection is built but untested with real money.
+- **Server-held owner key = demo only** — in production the key must live on the user's device or a KMS.
+- **USD is display only** — payment is an NGN bank transfer (USD needs a second KYC stage + USD account).
+- **Amount-matching is fragile** — if a customer sends a rounded amount it's stored as `unmatchedDeposits` for a human.
+- **JSON-file storage** won't work on read-only hosts — swap for a real DB before production.
+
+> **Env vars** (`BMONI_API_KEY`, `BMONI_BASE_URL`, `BMONI_WEBHOOK_SECRET`, `ALLOW_SIMULATE_PAYMENT`, `DEMO_FALLBACK_ACCOUNT`, `APP_PUBLIC_URL`, `CRON_SECRET`, `BMONI_MERCHANT_PHONE`) are in the frontend env table (**section 8b**). The sandbox key comes from BMONI's [API quickstart page](https://embedded-docs.bmoni.com/api-quickstart/) or the organisers (William set ours up); `BMONI_WEBHOOK_SECRET` is produced by running `scripts/register-webhook.ts`. Never commit any of them.
+
+---
+
+## 7. Prerequisites (install these once)
 
 - **Node.js 20+** and **npm**
 - **Python 3.11+** and **pip**
@@ -170,18 +205,18 @@ Two different kinds of timeout matter, plus one model-lifecycle risk:
 - A **Tavily API key** (free tier) for GTM competitor discovery
 - An **OpenRouter API key** (free account — [openrouter.ai](https://openrouter.ai))
 - A **GitHub OAuth app** (only needed for the GitHub connection)
-- A **BMONI sandbox key** (only needed for payments) — ask **William**
+- A **BMONI sandbox key** (only needed for payments) — the **shared sandbox key** is on BMONI's [API quickstart page](https://embedded-docs.bmoni.com/api-quickstart/) or from the hackathon organisers (William set ours up)
 
 ---
 
-## 7. Environment variables — READ THIS CAREFULLY
+## 8. Environment variables — READ THIS CAREFULLY
 
 **Secrets are NOT in this repo** (they're gitignored). Every teammate creates their own. There are **two** env files, one per app.
 
 > ### 🔑 The golden rule: use `localhost` EVERYWHERE, not `127.0.0.1`
 > The login uses a session cookie. If the frontend talks to `127.0.0.1:5000` but you open the app at `localhost:3000` (or vice-versa), the browser treats them as different sites and **drops the cookie → you get logged out / 401 right after login.** Keep it `localhost` on both sides, and in the GitHub callback URL too.
 
-### 7a. Backend — create `backend/.env`
+### 8a. Backend — create `backend/.env`
 
 There is **no example file** for the backend, so create `backend/.env` yourself with these keys:
 
@@ -207,14 +242,14 @@ There is **no example file** for the backend, so create `backend/.env` yourself 
 
 > **GitHub tip:** use an **OAuth App** (not a GitHub App). OAuth App tokens don't expire and match the code's `scope=repo` flow. A GitHub App's user tokens expire after 8 hours and cause a "Try again" / 401 on the Connections screen.
 
-### 7b. Frontend — create `frontend/.env`
+### 8b. Frontend — create `frontend/.env`
 
 **Copy `frontend/env.example` → `frontend/.env`** and fill it in. (Next.js also reads `.env.local` if you prefer that name — either works; it's gitignored the same way.) Key values:
 
 | Variable | What it is |
 |---|---|
 | `NEXT_PUBLIC_API_BASE` | `http://localhost:5000` — the Flask backend. **Use `localhost`** (see the golden rule). Leave **blank** to run the offline "Ada" demo with no real backend. |
-| `BMONI_API_KEY` | BMONI **sandbox** payments key. **Ask William** — never commit it. |
+| `BMONI_API_KEY` | BMONI **sandbox** payments key (server-side only). Get the **shared sandbox key** from BMONI's [API quickstart page](https://embedded-docs.bmoni.com/api-quickstart/) or from the hackathon organisers (William set ours up). Verify it works end-to-end with `npx tsx --env-file=.env scripts/bmoni-proof.ts` (it's safe to re-run). **Never commit it.** |
 | `BMONI_BASE_URL` | `https://embedded-dev.bmoni.com` (sandbox only). |
 | `DEMO_FALLBACK_ACCOUNT` | `true` — shows a labelled placeholder account if BMONI can't issue a real one, so the demo still runs. |
 | `CRON_SECRET`, `BMONI_MERCHANT_PHONE`, `APP_PUBLIC_URL`, `NEXT_PUBLIC_SUPABASE_*` | Optional — see the comments inside `env.example`. |
@@ -223,7 +258,7 @@ There is **no example file** for the backend, so create `backend/.env` yourself 
 
 ---
 
-## 8. Running it locally
+## 9. Running it locally
 
 You'll use **up to 4 terminals**. Quick guide:
 - **Just testing login/signup?** You only need **Flask + Frontend** (terminals 4 and 5).
@@ -241,7 +276,7 @@ source venv/bin/activate
 
 pip install -r requirements.txt
 ```
-Then create `backend/.env` (section 7a) and make sure `DATABASE_URL` points at your Supabase Postgres database, then run `python -m flask db upgrade` from `backend/` to apply the schema.
+Then create `backend/.env` (section 8a) and make sure `DATABASE_URL` points at your Supabase Postgres database, then run `python -m flask db upgrade` from `backend/` to apply the schema.
 
 > **Schema management:** the schema is managed by Alembic via Flask-Migrate. Run `python -m flask db upgrade` after setting `DATABASE_URL` (and again after any pull that adds new migrations in `backend/migrations/`).
 
@@ -277,7 +312,7 @@ Open **http://localhost:3000**. 🎉
 
 ---
 
-## 9. Backend API — quick reference
+## 10. Backend API — quick reference
 
 All under cookie auth (`credentials: 'include'`). Business routes are under `/api/business/<id>`.
 
@@ -295,7 +330,7 @@ All under cookie auth (`credentials: 'include'`). Business routes are under `/ap
 
 ---
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 | Symptom | Fix |
 |---|---|
@@ -312,7 +347,7 @@ All under cookie auth (`credentials: 'include'`). Business routes are under `/ap
 
 ---
 
-## 11. Contributing
+## 12. Contributing
 
 - Branch off the latest `main` → open a PR → squash-merge → delete the branch.
 - **Never commit** `.env`, `.env.local`, or any credentials.
