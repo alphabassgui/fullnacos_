@@ -191,7 +191,7 @@ Groville's **pricing + subscription billing**, built on **BMONI** as the Nigeria
 - **Amount-matching is fragile** — if a customer sends a rounded amount it's stored as `unmatchedDeposits` for a human.
 - **JSON-file storage** won't work on read-only hosts — swap for a real DB before production.
 
-> **Env vars** (`BMONI_API_KEY`, `BMONI_BASE_URL`, `BMONI_WEBHOOK_SECRET`, `ALLOW_SIMULATE_PAYMENT`, `DEMO_FALLBACK_ACCOUNT`, `APP_PUBLIC_URL`, `CRON_SECRET`, `BMONI_MERCHANT_PHONE`) are in the frontend env table (**section 8b**). Ask **William** for the sandbox key — never commit it.
+> **Env vars** (`BMONI_API_KEY`, `BMONI_BASE_URL`, `BMONI_WEBHOOK_SECRET`, `ALLOW_SIMULATE_PAYMENT`, `DEMO_FALLBACK_ACCOUNT`, `APP_PUBLIC_URL`, `CRON_SECRET`, `BMONI_MERCHANT_PHONE`) are in the frontend env table (**section 8b**). The sandbox key comes from BMONI's [API quickstart page](https://embedded-docs.bmoni.com/api-quickstart/) or the organisers (William set ours up); `BMONI_WEBHOOK_SECRET` is produced by running `scripts/register-webhook.ts`. Never commit any of them.
 
 ---
 
@@ -205,7 +205,7 @@ Groville's **pricing + subscription billing**, built on **BMONI** as the Nigeria
 - A **Tavily API key** (free tier) for GTM competitor discovery
 - An **OpenRouter API key** (free account — [openrouter.ai](https://openrouter.ai))
 - A **GitHub OAuth app** (only needed for the GitHub connection)
-- A **BMONI sandbox key** (only needed for payments) — ask **William**
+- A **BMONI sandbox key** (only needed for payments) — the **shared sandbox key** is on BMONI's [API quickstart page](https://embedded-docs.bmoni.com/api-quickstart/) or from the hackathon organisers (William set ours up)
 
 ---
 
@@ -249,7 +249,7 @@ There is **no example file** for the backend, so create `backend/.env` yourself 
 | Variable | What it is |
 |---|---|
 | `NEXT_PUBLIC_API_BASE` | `http://localhost:5000` — the Flask backend. **Use `localhost`** (see the golden rule). Leave **blank** to run the offline "Ada" demo with no real backend. |
-| `BMONI_API_KEY` | BMONI **sandbox** payments key. **Ask William** — never commit it. |
+| `BMONI_API_KEY` | BMONI **sandbox** payments key (server-side only). Get the **shared sandbox key** from BMONI's [API quickstart page](https://embedded-docs.bmoni.com/api-quickstart/) or from the hackathon organisers (William set ours up). Verify it works end-to-end with `npx tsx --env-file=.env scripts/bmoni-proof.ts` (it's safe to re-run). **Never commit it.** |
 | `BMONI_BASE_URL` | `https://embedded-dev.bmoni.com` (sandbox only). |
 | `DEMO_FALLBACK_ACCOUNT` | `true` — shows a labelled placeholder account if BMONI can't issue a real one, so the demo still runs. |
 | `CRON_SECRET`, `BMONI_MERCHANT_PHONE`, `APP_PUBLIC_URL`, `NEXT_PUBLIC_SUPABASE_*` | Optional — see the comments inside `env.example`. |
