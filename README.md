@@ -236,7 +236,10 @@ There is **no example file** for the backend, so create `backend/.env` yourself 
 | `GITHUB_CLIENT_ID` | From your GitHub **OAuth App**. |
 | `GITHUB_CLIENT_SECRET` | From your GitHub **OAuth App**. |
 | `GITHUB_REDIRECT_URI` | `http://localhost:5000/api/connections/github/callback` — must **exactly** match the callback URL set on your OAuth app. |
-| `FRONTEND_URL` | `http://localhost:3000` — where the GitHub callback sends the user back to. |
+| `GOOGLE_SEARCH_CONSOLE_CLIENT_ID` | From a **Google Cloud OAuth 2.0 Client** (Web application) with the **Search Console API** enabled. **Required** for the Search Console connection — the connector reads it via `os.environ[...]`, so if it's missing the connect flow and `/properties` **crash with a 500** (not a clean "not connected"). |
+| `GOOGLE_SEARCH_CONSOLE_CLIENT_SECRET` | The matching secret from that same Google OAuth client. **Required** (same 500 if missing). |
+| `GOOGLE_SEARCH_CONSOLE_REDIRECT_URI` | `http://localhost:5000/api/connections/search-console/callback` — must **exactly** match an **Authorized redirect URI** on the Google OAuth client. **Required** (same 500 if missing). |
+| `FRONTEND_URL` | `http://localhost:3000` — where the GitHub/Search Console callback sends the user back to. |
 | `DEBUG` | `True` locally (keeps the cookie non-Secure so it works over plain http). |
 | `INSTAGRAM_*` | Optional — only for the Instagram connection; not needed for the core demo. |
 
@@ -337,6 +340,8 @@ All under cookie auth (`credentials: 'include'`). Business routes are under `/ap
 | **Logged out / 401 right after login** | You're mixing `localhost` and `127.0.0.1`. Use `localhost` everywhere (API base, browser URL, GitHub callback). |
 | **Celery: `WinError 5`** | Start the worker with `--pool=solo`. |
 | **GitHub connection shows "Try again" / 401** | The OAuth token expired or the callback URL doesn't match. Use an **OAuth App**, set both the app's callback and `GITHUB_REDIRECT_URI` to `http://localhost:5000/api/connections/github/callback`, restart Flask, and reconnect. |
+| **`/connections/search-console/properties` returns 500** | The `GOOGLE_SEARCH_CONSOLE_CLIENT_ID` / `_CLIENT_SECRET` / `_REDIRECT_URI` env vars are missing — the connector reads them via `os.environ[...]` and throws. Add all three to `backend/.env` (section 8a), restart Flask, and reconnect. The real error is in the 500 **response body** (`"error": …`), visible in the browser Network tab. |
+| **`/connections/github/repositories` returns 500 (not 404)** | A stored GitHub connection exists but its token can't be **decrypted** — your `TOKEN_ENCRYPTION_KEY` differs from the one that encrypted it (e.g. the connection was made on another machine/deploy against the same database). Use the **same** `TOKEN_ENCRYPTION_KEY`, or disconnect and reconnect GitHub locally. Check the 500 **response body** for the exact error. |
 | **"No connector available for action type: X"** | Make sure the backend is on the latest `main` (the connector fallback is merged). |
 | **Analyze crashes: "Opportunity response must be a JSON object"** | The small LLM occasionally returns malformed JSON. Just **re-run analyze**. |
 | **GTM run fails at the vision step (model-not-found)** | The free vision model was rotated out by OpenRouter. Set `OPENROUTER_VISION_MODEL` to a current multimodal (image-input) `:free` model and restart (see section 5). |
